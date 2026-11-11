@@ -6483,3 +6483,367 @@ class KDTree:
             int(n_visited)
         )
 
+# Step 30 - build_lsh
+def build_lsh(X, n_tables, n_bits, seed=0):
+    """Return an index dict with 'planes' and 'tables' for
+    random-hyperplane locality-sensitive hashing.
+
+    Parameters
+    ----------
+    X : ndarray, shape (N, D)
+        Training observations.
+
+    n_tables : int
+        Number of independent hash tables.
+
+    n_bits : int
+        Number of random hyperplanes per table.
+
+    seed : int, default=0
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    index : dict
+        'planes': list of random hyperplane matrices.
+                  Each has shape (n_bits, D).
+
+        'tables': list of dictionaries mapping integer hash
+                  codes to lists of training row indices.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Convert and validate the training data.
+    # ---------------------------------------------------------
+
+    X = np.asarray(X, dtype=float)
+
+    if X.ndim != 2:
+        raise ValueError("X must be a 2D array.")
+
+    N, D = X.shape
+
+    if N == 0 or D == 0:
+        raise ValueError("X must contain observations and features.")
+
+    if not np.all(np.isfinite(X)):
+        raise ValueError("X must contain finite values.")
+
+    # ---------------------------------------------------------
+    # 2. Validate the number of tables and bits.
+    # ---------------------------------------------------------
+
+    if (
+        isinstance(n_tables, (bool, np.bool_))
+        or not isinstance(n_tables, (int, np.integer))
+        or n_tables < 1
+    ):
+        raise ValueError("n_tables must be a positive integer.")
+
+    if (
+        isinstance(n_bits, (bool, np.bool_))
+        or not isinstance(n_bits, (int, np.integer))
+        or n_bits < 1
+    ):
+        raise ValueError("n_bits must be a positive integer.")
+
+    # ---------------------------------------------------------
+    # 3. Initialize one random number generator.
+    # ---------------------------------------------------------
+
+    rng = np.random.default_rng(seed)
+
+    planes_list = []
+    tables_list = []
+
+    # ---------------------------------------------------------
+    # 4. Construct each independent hash table.
+    # ---------------------------------------------------------
+
+    for _ in range(n_tables):
+
+        # Draw n_bits random hyperplanes.
+        #
+        # Each row is sampled from a standard normal distribution.
+        #
+        # Shape: (n_bits, D)
+
+        planes = rng.normal(
+            size=(n_bits, D)
+        )
+
+        # -----------------------------------------------------
+        # 5. Calculate the random-hyperplane hash bits.
+        # -----------------------------------------------------
+
+        # For each observation x:
+        #
+        # bit_b = 1 if planes[b] @ x > 0
+        #         0 otherwise
+        #
+        # Calculate all projections using matrix multiplication.
+        #
+        # Shape: (N, n_bits)
+
+        projections = X @ planes.T
+
+        bits = projections > 0.0
+
+        # -----------------------------------------------------
+        # 6. Convert the bit vectors into integer hash codes.
+        # -----------------------------------------------------
+
+        # code = sum_b bit_b * 2**b
+        #
+        # Python integers are used so the encoding also works
+        # when n_bits exceeds the usual fixed-width integer range.
+
+        codes = [
+            sum(
+                1 << int(b)
+                for b in np.flatnonzero(row)
+            )
+            for row in bits
+        ]
+
+        # -----------------------------------------------------
+        # 7. Construct the hash table.
+        # -----------------------------------------------------
+
+        # Each integer code maps to a list of row indices.
+        #
+        # Iterating through rows in increasing order ensures
+        # that the indices in every bucket are also increasing.
+
+        table = {}
+
+        for row_index, code in enumerate(codes):
+
+            if code not in table:
+                table[code] = []
+
+            table[code].append(row_index)
+
+        # -----------------------------------------------------
+        # 8. Store this table's hyperplanes and hash dictionary.
+        # -----------------------------------------------------
+
+        planes_list.append(planes)
+        tables_list.append(table)
+
+    # Return the complete LSH index.
+    return {
+        "planes": planes_list,
+        "tables": tables_list
+    }
+
+
+def query_lsh(index, X, q, k):
+    """Return (ids, n_candidates): up to k candidates ranked
+    by exact cosine similarity to query q.
+
+    Parameters
+    ----------
+    index : dict
+        LSH index returned by build_lsh().
+
+    X : ndarray, shape (N, D)
+        Original indexed training observations.
+
+    q : ndarray, shape (D,)
+        Query observation.
+
+    k : int
+        Maximum number of candidate neighbours to return.
+
+    Returns
+    -------
+    ids : ndarray, shape (min(k, n_candidates),)
+        Training row indices ranked by descending cosine similarity.
+        Ties are resolved using the smaller original row index.
+
+    n_candidates : int
+        Number of unique candidate observations retrieved
+        across all hash tables.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Convert and validate inputs.
+    # ---------------------------------------------------------
+
+    X = np.asarray(X, dtype=float)
+    q = np.asarray(q, dtype=float)
+
+    if X.ndim != 2:
+        raise ValueError("X must be a 2D array.")
+
+    if X.shape[0] == 0 or X.shape[1] == 0:
+        raise ValueError("X must contain observations and features.")
+
+    if q.ndim not in (1, 2) or q.size != X.shape[1]:
+        raise ValueError(
+            "q must be a vector with the same feature dimension as X."
+        )
+
+    q = q.reshape(-1)
+
+    if not np.all(np.isfinite(X)) or not np.all(np.isfinite(q)):
+        raise ValueError("X and q must contain finite values.")
+
+    # ---------------------------------------------------------
+    # 2. Validate k and the index structure.
+    # ---------------------------------------------------------
+
+    if (
+        isinstance(k, (bool, np.bool_))
+        or not isinstance(k, (int, np.integer))
+        or k < 0
+    ):
+        raise ValueError("k must be a non-negative integer.")
+
+    if not isinstance(index, dict):
+        raise ValueError("index must be a dictionary.")
+
+    if "planes" not in index or "tables" not in index:
+        raise ValueError("index must contain 'planes' and 'tables'.")
+
+    planes_list = index["planes"]
+    tables_list = index["tables"]
+
+    if len(planes_list) != len(tables_list):
+        raise ValueError(
+            "The number of hyperplane matrices and hash tables must match."
+        )
+
+    # ---------------------------------------------------------
+    # 3. Retrieve candidates from all matching hash buckets.
+    # ---------------------------------------------------------
+
+    # Use a set to prevent duplicate candidate indices from
+    # appearing when the same point is found in several tables.
+
+    candidate_set = set()
+
+    for planes, table in zip(planes_list, tables_list):
+
+        planes = np.asarray(planes, dtype=float)
+
+        if planes.ndim != 2 or planes.shape[1] != X.shape[1]:
+            raise ValueError(
+                "Every hyperplane matrix must have shape (n_bits, D)."
+            )
+
+        if not isinstance(table, dict):
+            raise ValueError("Every hash table must be a dictionary.")
+
+        # Calculate the query's hash bits using the same
+        # hyperplanes used to build this particular table.
+
+        query_projections = planes @ q
+
+        query_bits = query_projections > 0.0
+
+        # Convert the query bit vector into its integer code.
+        #
+        # Bit b contributes 2**b to the code.
+
+        query_code = sum(
+            1 << int(b)
+            for b in np.flatnonzero(query_bits)
+        )
+
+        # Retrieve the bucket with the matching code.
+        bucket = table.get(query_code, [])
+
+        # Validate bucket indices before adding them.
+        for row_index in bucket:
+
+            if (
+                isinstance(row_index, (bool, np.bool_))
+                or not isinstance(row_index, (int, np.integer))
+                or not 0 <= row_index < len(X)
+            ):
+                raise ValueError("Invalid row index in hash table.")
+
+            candidate_set.add(int(row_index))
+
+    # ---------------------------------------------------------
+    # 4. Convert the candidate union into sorted row indices.
+    # ---------------------------------------------------------
+
+    # Sorting gives deterministic candidate ordering and
+    # makes tie-breaking by original index straightforward.
+
+    candidate_indices = np.array(
+        sorted(candidate_set),
+        dtype=int
+    )
+
+    n_candidates = len(candidate_indices)
+
+    # ---------------------------------------------------------
+    # 5. Handle empty candidates or k=0.
+    # ---------------------------------------------------------
+
+    if n_candidates == 0 or k == 0:
+
+        return (
+            np.empty(0, dtype=int),
+            int(n_candidates)
+        )
+
+    # ---------------------------------------------------------
+    # 6. Compute exact cosine similarities for the candidates.
+    # ---------------------------------------------------------
+
+    # Reuse unit_rows() from Step 19.
+    #
+    # Only candidate embeddings are normalized and scored,
+    # rather than scanning the complete training dataset.
+
+    candidate_embeddings = X[candidate_indices]
+
+    candidate_hat, _ = unit_rows(candidate_embeddings)
+
+    query_hat, _ = unit_rows(q.reshape(1, -1))
+
+    # Cosine similarity is the dot product of unit vectors.
+    #
+    # Shape: (n_candidates,)
+
+    similarities = candidate_hat @ query_hat[0]
+
+    # Protect against small floating-point excursions.
+    similarities = np.clip(
+        similarities,
+        -1.0,
+        1.0
+    )
+
+    # ---------------------------------------------------------
+    # 7. Rank candidates by exact cosine similarity.
+    # ---------------------------------------------------------
+
+    # Primary sorting key:
+    #   Descending cosine similarity.
+    #
+    # Secondary sorting key:
+    #   Ascending original training index.
+    #
+    # np.lexsort uses the final key as the primary sorting key.
+
+    order = np.lexsort((
+        candidate_indices,
+        -similarities
+    ))
+
+    ranked_indices = candidate_indices[order]
+
+    # ---------------------------------------------------------
+    # 8. Return at most k nearest candidates.
+    # ---------------------------------------------------------
+
+    ids = ranked_indices[:k].astype(int)
+
+    return ids, int(n_candidates)
+
