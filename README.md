@@ -31,6 +31,7 @@ python scaffold.py
 - [x] **19.** contrastive_loss
 - [x] **20.** mine_triplets
 - [x] **21.** triplet_loss
+- [x] **22.** npairs_loss
 
 ---
 

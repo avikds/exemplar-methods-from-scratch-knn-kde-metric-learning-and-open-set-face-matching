@@ -4047,3 +4047,276 @@ def triplet_loss(E, triplets, m=0.2):
 
     return loss, G
 
+# Step 22 - npairs_loss
+def npairs_loss(E, y, tau=1.0):
+    """Return (loss, G): mean N-pairs loss (eq 16.12)
+    over ordered positive pairs and its gradient with respect to E.
+
+    Parameters
+    ----------
+    E : ndarray, shape (N, L)
+        Embedding matrix, with observations stored in rows.
+
+    y : ndarray, shape (N,)
+        Class labels.
+
+    tau : float, default=1.0
+        Positive temperature parameter.
+
+    Returns
+    -------
+    loss : float
+        Mean N-pairs loss over all ordered positive pairs.
+
+    G : ndarray, shape (N, L)
+        Exact gradient of the loss with respect to E.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Convert inputs and validate dimensions.
+    # ---------------------------------------------------------
+
+    E = np.asarray(E, dtype=float)
+    y = np.asarray(y)
+
+    if E.ndim != 2:
+        raise ValueError("E must be a 2D array.")
+
+    if y.ndim != 1:
+        raise ValueError("y must be a 1D array.")
+
+    N, L = E.shape
+
+    if N < 2 or L == 0:
+        raise ValueError("E must contain at least two embeddings.")
+
+    if len(y) != N:
+        raise ValueError(
+            "E and y must have the same number of observations."
+        )
+
+    if not np.all(np.isfinite(E)):
+        raise ValueError("E must contain finite values.")
+
+    # ---------------------------------------------------------
+    # 2. Validate the temperature.
+    # ---------------------------------------------------------
+
+    try:
+        tau = float(tau)
+    except (TypeError, ValueError):
+        raise ValueError("tau must be a positive finite number.")
+
+    if not np.isfinite(tau) or tau <= 0:
+        raise ValueError("tau must be a positive finite number.")
+
+    # ---------------------------------------------------------
+    # 3. Find all ordered positive pairs.
+    # ---------------------------------------------------------
+
+    # A positive pair (i, j) satisfies:
+    #
+    # i != j and y[i] == y[j]
+    #
+    # Both (i, j) and (j, i) are included.
+
+    same_class = y[:, None] == y[None, :]
+
+    # Exclude self-pairs.
+    np.fill_diagonal(same_class, False)
+
+    # Obtain all ordered positive pairs.
+    anchors, positives = np.where(same_class)
+
+    n_pairs = len(anchors)
+
+    if n_pairs == 0:
+        raise ValueError(
+            "The batch must contain at least one ordered positive pair."
+        )
+
+    # Every anchor must have at least one negative observation.
+    negative_mask = y[anchors, None] != y[None, :]
+
+    if not np.all(np.any(negative_mask, axis=1)):
+        raise ValueError(
+            "Every anchor must have at least one negative observation."
+        )
+
+    # ---------------------------------------------------------
+    # 4. Compute the positive-pair similarity.
+    # ---------------------------------------------------------
+
+    # Similarity between each anchor and its corresponding
+    # positive observation:
+    #
+    # s_ij = e_i.T @ e_j
+
+    positive_similarity = np.sum(
+        E[anchors] * E[positives],
+        axis=1
+    )
+
+    # ---------------------------------------------------------
+    # 5. Compute all anchor-negative similarities.
+    # ---------------------------------------------------------
+
+    # Similarities between every anchor and every batch point:
+    #
+    # s_ik = e_i.T @ e_k
+
+    all_similarity = E[anchors] @ E.T
+
+    # ---------------------------------------------------------
+    # 6. Compute the N-pairs logits.
+    # ---------------------------------------------------------
+
+    # For each ordered positive pair (i, j), and negative k:
+    #
+    # z_ijk = (e_i.T @ e_k - e_i.T @ e_j) / tau
+
+    logits = (
+        all_similarity
+        - positive_similarity[:, None]
+    ) / tau
+
+    # Only observations belonging to a different class
+    # from the anchor are negatives.
+    #
+    # All other entries are excluded from the loss.
+
+    logits = np.where(
+        negative_mask,
+        logits,
+        -np.inf
+    )
+
+    # ---------------------------------------------------------
+    # 7. Calculate the loss using stable log-sum-exp.
+    # ---------------------------------------------------------
+
+    # l_ij = log(1 + sum_k exp(z_ijk))
+    #
+    # Include the constant 1 as a zero logit.
+    #
+    # For numerical stability, subtract the maximum between
+    # zero and all valid negative logits.
+
+    row_max = np.maximum(
+        0.0,
+        np.max(logits, axis=1)
+    )
+
+    # Exponentiate only shifted logits.
+    # Invalid negative positions remain zero.
+    shifted_exp = np.exp(
+        logits - row_max[:, None]
+    )
+
+    # Denominator after exponent shifting:
+    #
+    # exp(-row_max) + sum_k exp(logit_k - row_max)
+
+    denominator = (
+        np.exp(-row_max)
+        + np.sum(shifted_exp, axis=1)
+    )
+
+    # Recover the log denominator.
+    log_denominator = (
+        row_max + np.log(denominator)
+    )
+
+    # Mean N-pairs loss over all ordered positive pairs.
+    loss = float(np.mean(log_denominator))
+
+    # ---------------------------------------------------------
+    # 8. Compute the negative probabilities.
+    # ---------------------------------------------------------
+
+    # q_ijk = exp(z_ijk) / (1 + sum_k exp(z_ijk))
+    #
+    # Use the shifted exponentials to avoid numerical
+    # overflow and underflow.
+
+    q = shifted_exp / denominator[:, None]
+
+    # Sum of negative probabilities for every positive pair.
+    q_sum = np.sum(
+        q,
+        axis=1
+    )
+
+    # ---------------------------------------------------------
+    # 9. Calculate the gradient contribution for anchors.
+    # ---------------------------------------------------------
+
+    # For each ordered pair (i, j):
+    #
+    # d l_ij / d e_i =
+    #     (1/tau) * sum_k q_ijk * (e_k - e_j)
+
+    grad_anchor = (
+        q @ E
+        - q_sum[:, None] * E[positives]
+    ) / tau
+
+    # ---------------------------------------------------------
+    # 10. Calculate the gradient contribution for positives.
+    # ---------------------------------------------------------
+
+    # d l_ij / d e_j =
+    #     -(1/tau) * sum_k q_ijk * e_i
+
+    grad_positive = (
+        -q_sum[:, None] * E[anchors]
+    ) / tau
+
+    # ---------------------------------------------------------
+    # 11. Calculate the gradient contribution for negatives.
+    # ---------------------------------------------------------
+
+    # d l_ij / d e_k =
+    #     q_ijk * e_i / tau
+
+    # Summing over all ordered positive pairs gives:
+    #
+    # G_negative = q.T @ E[anchors] / tau
+
+    grad_negative = (
+        q.T @ E[anchors]
+    ) / tau
+
+    # ---------------------------------------------------------
+    # 12. Accumulate all gradient contributions.
+    # ---------------------------------------------------------
+
+    G = np.zeros_like(E)
+
+    # Multiple pairs can share the same anchor or positive.
+    # Use np.add.at to accumulate all contributions correctly.
+
+    np.add.at(
+        G,
+        anchors,
+        grad_anchor
+    )
+
+    np.add.at(
+        G,
+        positives,
+        grad_positive
+    )
+
+    # The matrix multiplication already accumulates all
+    # negative-role contributions for each observation.
+    G += grad_negative
+
+    # ---------------------------------------------------------
+    # 13. Average the gradient over ordered positive pairs.
+    # ---------------------------------------------------------
+
+    G /= n_pairs
+
+    return loss, G
+
