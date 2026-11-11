@@ -11,6 +11,7 @@ python scaffold.py
 ## Steps
 
 - [x] **1.** pairwise_sq_dists
+- [x] **2.** knn_proba
 
 ---
 

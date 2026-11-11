@@ -105,3 +105,113 @@ def pairwise_sq_dists(X, Y=None, M=None):
 
     return distances
 
+# Step 2 - knn_proba
+def knn_proba(X_train, y_train, X_query, K, n_classes=None, M=None):
+    """Return the (n_query, n_classes) array of KNN class probabilities.
+
+    Parameters
+    ----------
+    X_train : ndarray, shape (n_train, n_features)
+        Training feature vectors.
+
+    y_train : ndarray, shape (n_train,)
+        Integer training labels starting from 0.
+
+    X_query : ndarray, shape (n_query, n_features)
+        Query feature vectors.
+
+    K : int
+        Number of nearest neighbours.
+
+    n_classes : int, optional
+        Total number of classes. If None, inferred as max(y_train) + 1.
+
+    M : ndarray, shape (n_features, n_features), optional
+        Mahalanobis metric matrix. If None, Euclidean distance is used.
+
+    Returns
+    -------
+    proba : ndarray, shape (n_query, n_classes)
+        Probability distribution over classes for every query point.
+    """
+
+    X_train = np.asarray(X_train, dtype=float)
+    y_train = np.asarray(y_train)
+    X_query = np.asarray(X_query, dtype=float)
+
+    # Validate input dimensions.
+    if X_train.ndim != 2:
+        raise ValueError("X_train must be a 2D array.")
+
+    if X_query.ndim != 2:
+        raise ValueError("X_query must be a 2D array.")
+
+    if y_train.ndim != 1:
+        raise ValueError("y_train must be a 1D array.")
+
+    n_train = X_train.shape[0]
+    n_query = X_query.shape[0]
+
+    # Ensure that every training point has a corresponding label.
+    if len(y_train) != n_train:
+        raise ValueError("X_train and y_train must have the same number of samples.")
+
+    # Validate K.
+    if isinstance(K, (bool, np.bool_)) or not isinstance(K, (int, np.integer)):
+        raise ValueError("K must be an integer.")
+
+    if K < 1 or K > n_train:
+        raise ValueError("K must be at least 1 and cannot exceed the number of training points.")
+
+    # Labels must be non-negative integers starting from 0.
+    if not np.issubdtype(y_train.dtype, np.integer):
+        raise ValueError("y_train must contain integer class labels.")
+
+    if np.any(y_train < 0):
+        raise ValueError("Class labels must be non-negative.")
+
+    # Determine the number of classes.
+    if n_classes is None:
+        n_classes = int(y_train.max()) + 1
+
+    else:
+        if (
+            isinstance(n_classes, (bool, np.bool_))
+            or not isinstance(n_classes, (int, np.integer))
+            or n_classes < 1
+        ):
+            raise ValueError("n_classes must be a positive integer.")
+
+        n_classes = int(n_classes)
+
+    if np.any(y_train >= n_classes):
+        raise ValueError("Every training label must be smaller than n_classes.")
+
+    # Compute pairwise squared distances using the function from Step 1.
+    distances = pairwise_sq_dists(X_query, X_train, M=M)
+
+    # Find the K nearest training points.
+    # Stable sorting ensures that ties are resolved by the smaller
+    # training-point index.
+    nearest_indices = np.argsort(distances, axis=1, kind="stable")[:, :K]
+
+    # Retrieve the class labels of the nearest neighbours.
+    nearest_labels = y_train[nearest_indices]
+
+    # Count the occurrences of each class among the K neighbours.
+    proba = np.zeros((n_query, n_classes), dtype=float)
+
+    # Use np.add.at to correctly accumulate repeated class labels.
+    query_indices = np.repeat(np.arange(n_query), K)
+
+    np.add.at(
+        proba,
+        (query_indices, nearest_labels.ravel()),
+        1.0
+    )
+
+    # Convert class counts into probabilities.
+    proba /= K
+
+    return proba
+
