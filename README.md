@@ -21,6 +21,7 @@ python scaffold.py
 - [x] **9.** kde_logpdf
 - [x] **10.** balloon_posterior
 - [x] **11.** kde_classifier
+- [x] **12.** nadaraya_watson
 
 ---
 

@@ -1768,3 +1768,183 @@ def kde_classifier(X_train, y_train, X_query, h, n_classes=None):
 
     return posterior
 
+# Step 12 - nadaraya_watson
+def nadaraya_watson(x_train, y_train, x_query, h, sigma=0.0):
+    """Return (mean, var) of Gaussian kernel regression at the queries.
+
+    Parameters
+    ----------
+    x_train : ndarray, shape (N,) or (N, D)
+        Training input observations.
+
+    y_train : ndarray, shape (N,)
+        Training target values. Flattened automatically.
+
+    x_query : ndarray, shape (n_query,) or (n_query, D)
+        Query input observations.
+
+    h : float
+        Positive Gaussian kernel bandwidth.
+
+    sigma : float, default=0.0
+        Standard deviation of the observation noise.
+
+    Returns
+    -------
+    mean : ndarray, shape (n_query,)
+        Nadaraya-Watson conditional mean predictions.
+
+    var : ndarray, shape (n_query,)
+        Conditional predictive variance estimates.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Convert inputs to NumPy arrays.
+    # ---------------------------------------------------------
+
+    x_train = np.asarray(x_train, dtype=float)
+    x_query = np.asarray(x_query, dtype=float)
+    y_train = np.asarray(y_train, dtype=float).ravel()
+
+    # Treat 1-D inputs as one-dimensional feature vectors.
+    if x_train.ndim == 1:
+        x_train = x_train.reshape(-1, 1)
+    elif x_train.ndim != 2:
+        raise ValueError("x_train must be a 1-D or 2-D array.")
+
+    if x_query.ndim == 1:
+        x_query = x_query.reshape(-1, 1)
+    elif x_query.ndim != 2:
+        raise ValueError("x_query must be a 1-D or 2-D array.")
+
+    # ---------------------------------------------------------
+    # 2. Validate input dimensions and values.
+    # ---------------------------------------------------------
+
+    N, D = x_train.shape
+    n_query = x_query.shape[0]
+
+    if N == 0 or D == 0:
+        raise ValueError("x_train must contain observations and features.")
+
+    if len(y_train) != N:
+        raise ValueError(
+            "x_train and y_train must have the same number of observations."
+        )
+
+    if x_query.shape[1] != D:
+        raise ValueError(
+            "x_train and x_query must have the same number of features."
+        )
+
+    if not np.all(np.isfinite(x_train)):
+        raise ValueError("x_train must contain finite values.")
+
+    if not np.all(np.isfinite(x_query)):
+        raise ValueError("x_query must contain finite values.")
+
+    if not np.all(np.isfinite(y_train)):
+        raise ValueError("y_train must contain finite values.")
+
+    # ---------------------------------------------------------
+    # 3. Validate the bandwidth and noise standard deviation.
+    # ---------------------------------------------------------
+
+    try:
+        h = float(h)
+        sigma = float(sigma)
+    except (TypeError, ValueError):
+        raise ValueError("h and sigma must be finite scalar values.")
+
+    if not np.isfinite(h) or h <= 0:
+        raise ValueError("h must be a positive finite number.")
+
+    if not np.isfinite(sigma) or sigma < 0:
+        raise ValueError("sigma must be a finite non-negative number.")
+
+    # ---------------------------------------------------------
+    # 4. Compute pairwise squared Euclidean distances.
+    # ---------------------------------------------------------
+
+    # Reuse pairwise_sq_dists() from Step 1.
+    #
+    # Shape: (n_query, N)
+
+    sq_dists = pairwise_sq_dists(
+        x_query,
+        x_train
+    )
+
+    # ---------------------------------------------------------
+    # 5. Compute Gaussian kernel weights in log space.
+    # ---------------------------------------------------------
+
+    # Gaussian kernel:
+    #
+    # K_h(x - x_n) = exp(-||x - x_n||^2 / (2*h^2))
+    #
+    # The common Gaussian normalization constant cancels
+    # when calculating normalized weights.
+
+    log_weights = -sq_dists / (2.0 * h**2)
+
+    # ---------------------------------------------------------
+    # 6. Normalize weights using the log-sum-exp trick.
+    # ---------------------------------------------------------
+
+    # Subtract the maximum log weight in each query row
+    # before taking exponentials.
+    #
+    # This prevents all weights from underflowing to zero
+    # when queries are far from the training observations.
+
+    if n_query == 0:
+        return np.empty(0, dtype=float), np.empty(0, dtype=float)
+
+    row_max = np.max(
+        log_weights,
+        axis=1,
+        keepdims=True
+    )
+
+    shifted_weights = np.exp(
+        log_weights - row_max
+    )
+
+    # Normalize every row so that the weights sum to one.
+    weights = shifted_weights / np.sum(
+        shifted_weights,
+        axis=1,
+        keepdims=True
+    )
+
+    # ---------------------------------------------------------
+    # 7. Compute the Nadaraya-Watson conditional mean.
+    # ---------------------------------------------------------
+
+    # mu(x) = sum_n w_n(x) * y_n
+
+    mean = weights @ y_train
+
+    # ---------------------------------------------------------
+    # 8. Compute the conditional predictive variance.
+    # ---------------------------------------------------------
+
+    # V(x) = sigma^2
+    #        + sum_n w_n(x) * y_n^2
+    #        - mu(x)^2
+
+    second_moment = weights @ (y_train**2)
+
+    var = (
+        sigma**2
+        + second_moment
+        - mean**2
+    )
+
+    # Floating-point rounding can produce tiny negative values.
+    # Variance cannot be negative, so clip at zero.
+    var = np.maximum(var, 0.0)
+
+    return mean, var
+
