@@ -15,6 +15,7 @@ python scaffold.py
 - [x] **3.** error_vs_k
 - [x] **4.** one_nn_vs_bayes
 - [x] **5.** cube_edge_length
+- [x] **6.** noise_dimension_curve
 
 ---
 

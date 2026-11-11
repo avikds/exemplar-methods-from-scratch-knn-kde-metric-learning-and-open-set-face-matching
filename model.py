@@ -667,3 +667,167 @@ def cube_edge_length(p, D, N=100000, seed=0):
 
     return float(theory), float(empirical)
 
+# Step 6 - noise_dimension_curve
+def noise_dimension_curve(
+    X_train, y_train, X_test, y_test,
+    n_noise, K=5, scale=1.0, seed=0
+):
+    """Return KNN test accuracy after appending different numbers of noise features.
+
+    Parameters
+    ----------
+    X_train : ndarray, shape (n_train, n_features)
+        Original training features.
+
+    y_train : ndarray, shape (n_train,)
+        Training class labels.
+
+    X_test : ndarray, shape (n_test, n_features)
+        Original test features.
+
+    y_test : ndarray, shape (n_test,)
+        Test class labels.
+
+    n_noise : iterable of int
+        Numbers of noise dimensions to append.
+
+    K : int, default=5
+        Number of nearest neighbours used by KNN.
+
+    scale : float, default=1.0
+        Standard deviation multiplier for the Gaussian noise.
+
+    seed : int, default=0
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    accuracies : list of float
+        KNN test accuracy for each number of added noise dimensions.
+    """
+
+    # Convert inputs to NumPy arrays.
+    X_train = np.asarray(X_train, dtype=float)
+    y_train = np.asarray(y_train)
+
+    X_test = np.asarray(X_test, dtype=float)
+    y_test = np.asarray(y_test)
+
+    # ---------------------------------------------------------
+    # 1. Validate input dimensions and sample counts.
+    # ---------------------------------------------------------
+
+    if X_train.ndim != 2 or X_test.ndim != 2:
+        raise ValueError("X_train and X_test must be 2D arrays.")
+
+    if y_train.ndim != 1 or y_test.ndim != 1:
+        raise ValueError("y_train and y_test must be 1D arrays.")
+
+    if len(X_train) != len(y_train):
+        raise ValueError("X_train and y_train must have the same number of samples.")
+
+    if len(X_test) != len(y_test):
+        raise ValueError("X_test and y_test must have the same number of samples.")
+
+    if len(X_train) == 0 or len(X_test) == 0:
+        raise ValueError("Training and test sets must not be empty.")
+
+    if X_train.shape[1] != X_test.shape[1]:
+        raise ValueError("X_train and X_test must have the same number of features.")
+
+    # ---------------------------------------------------------
+    # 2. Validate class labels.
+    # ---------------------------------------------------------
+
+    if not np.issubdtype(y_train.dtype, np.integer):
+        raise ValueError("y_train must contain integer class labels.")
+
+    if not np.issubdtype(y_test.dtype, np.integer):
+        raise ValueError("y_test must contain integer class labels.")
+
+    if np.any(y_train < 0) or np.any(y_test < 0):
+        raise ValueError("Class labels must be non-negative.")
+
+    # Include labels appearing in either dataset.
+    n_classes = int(max(y_train.max(), y_test.max())) + 1
+
+    # ---------------------------------------------------------
+    # 3. Validate noise dimensions and scale.
+    # ---------------------------------------------------------
+
+    n_noise = list(n_noise)
+
+    for d in n_noise:
+        if (
+            isinstance(d, (bool, np.bool_))
+            or not isinstance(d, (int, np.integer))
+            or d < 0
+        ):
+            raise ValueError(
+                "Every entry in n_noise must be a non-negative integer."
+            )
+
+    if (
+        not np.isscalar(scale)
+        or not np.isfinite(scale)
+        or scale < 0
+    ):
+        raise ValueError("scale must be a finite non-negative number.")
+
+    # ---------------------------------------------------------
+    # 4. Initialize one random number generator for the
+    #    entire function call.
+    # ---------------------------------------------------------
+
+    rng = np.random.default_rng(seed)
+
+    # Store the accuracy corresponding to each noise dimension.
+    accuracies = []
+
+    # ---------------------------------------------------------
+    # 5. Evaluate KNN for each requested number of noise features.
+    # ---------------------------------------------------------
+
+    for d in n_noise:
+
+        # Draw training noise FIRST.
+        # Each noise feature follows N(0, scale^2).
+        train_noise = scale * rng.normal(
+            size=(len(X_train), d)
+        )
+
+        # Draw test noise SECOND using the same generator.
+        test_noise = scale * rng.normal(
+            size=(len(X_test), d)
+        )
+
+        # Append the noise features to the original datasets.
+        X_train_augmented = np.hstack(
+            (X_train, train_noise)
+        )
+
+        X_test_augmented = np.hstack(
+            (X_test, test_noise)
+        )
+
+        # Obtain KNN class probabilities.
+        # M=None means ordinary squared Euclidean distance.
+        probabilities = knn_proba(
+            X_train_augmented,
+            y_train,
+            X_test_augmented,
+            K,
+            n_classes=n_classes
+        )
+
+        # Predict the class with the largest probability.
+        # np.argmax selects the smallest class index in a tie.
+        y_pred = np.argmax(probabilities, axis=1)
+
+        # Calculate classification accuracy.
+        accuracy = np.mean(y_pred == y_test)
+
+        accuracies.append(float(accuracy))
+
+    return accuracies
+
