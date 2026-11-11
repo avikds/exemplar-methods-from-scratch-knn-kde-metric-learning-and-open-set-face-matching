@@ -4522,3 +4522,522 @@ def centroid_loss(E, y, centroids):
 
     return loss, G
 
+# Step 24 - train_embedding
+def pk_batch(y, n_classes, n_per_class, rng):
+    """Return indices of a class-balanced P-K batch.
+
+    Select min(n_classes, number of available classes) distinct
+    classes, then sample n_per_class different observations
+    from each selected class.
+
+    Parameters
+    ----------
+    y : ndarray, shape (N,)
+        Original class labels. Labels need not be contiguous.
+
+    n_classes : int
+        Maximum number of distinct classes to select.
+
+    n_per_class : int
+        Number of observations sampled from each selected class.
+
+    rng : numpy.random.Generator
+        Random number generator.
+
+    Returns
+    -------
+    indices : ndarray, shape (P * K,)
+        Indices of the selected training observations.
+    """
+
+    # Convert labels to a NumPy array.
+    y = np.asarray(y)
+
+    if y.ndim != 1:
+        raise ValueError("y must be a 1D array.")
+
+    if y.size == 0:
+        raise ValueError("y must contain at least one observation.")
+
+    # Validate the requested number of classes.
+    if (
+        isinstance(n_classes, (bool, np.bool_))
+        or not isinstance(n_classes, (int, np.integer))
+        or n_classes < 1
+    ):
+        raise ValueError("n_classes must be a positive integer.")
+
+    # Validate the number of observations per class.
+    if (
+        isinstance(n_per_class, (bool, np.bool_))
+        or not isinstance(n_per_class, (int, np.integer))
+        or n_per_class < 1
+    ):
+        raise ValueError("n_per_class must be a positive integer.")
+
+    # ---------------------------------------------------------
+    # 1. Identify all available classes.
+    # ---------------------------------------------------------
+
+    classes = np.unique(y)
+
+    # Select the requested number of classes, without replacement.
+    P = min(int(n_classes), len(classes))
+
+    selected_classes = rng.choice(
+        classes,
+        size=P,
+        replace=False
+    )
+
+    # ---------------------------------------------------------
+    # 2. Sample n_per_class observations from each class.
+    # ---------------------------------------------------------
+
+    batch_indices = []
+
+    for c in selected_classes:
+
+        # Find all training indices belonging to class c.
+        class_indices = np.flatnonzero(y == c)
+
+        if len(class_indices) < n_per_class:
+            raise ValueError(
+                f"Class {c} contains fewer than n_per_class observations."
+            )
+
+        # Sample distinct observations without replacement.
+        sampled_indices = rng.choice(
+            class_indices,
+            size=n_per_class,
+            replace=False
+        )
+
+        batch_indices.append(sampled_indices)
+
+    # Concatenate the selected observations into one batch.
+    return np.concatenate(batch_indices).astype(int)
+
+
+def sphere_gradient(W, X, G):
+    """Apply the chain rule through row-wise unit normalization.
+
+    Given:
+        Z = X @ W.T
+        E_hat = unit_rows(Z)
+        G = dL/dE_hat
+
+    Return:
+        dL/dW
+
+    Parameters
+    ----------
+    W : ndarray, shape (L, D)
+        Linear transformation matrix.
+
+    X : ndarray, shape (N, D)
+        Input observations.
+
+    G : ndarray, shape (N, L)
+        Gradient with respect to normalized embeddings.
+
+    Returns
+    -------
+    grad_W : ndarray, shape (L, D)
+        Gradient with respect to W.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Convert and validate inputs.
+    # ---------------------------------------------------------
+
+    W = np.asarray(W, dtype=float)
+    X = np.asarray(X, dtype=float)
+    G = np.asarray(G, dtype=float)
+
+    if W.ndim != 2:
+        raise ValueError("W must be a 2D array.")
+
+    if X.ndim != 2:
+        raise ValueError("X must be a 2D array.")
+
+    if G.ndim != 2:
+        raise ValueError("G must be a 2D array.")
+
+    L, D = W.shape
+    N = X.shape[0]
+
+    if X.shape[1] != D:
+        raise ValueError("X and W have incompatible feature dimensions.")
+
+    if G.shape != (N, L):
+        raise ValueError("G must have shape (N, L).")
+
+    if not (
+        np.all(np.isfinite(W))
+        and np.all(np.isfinite(X))
+        and np.all(np.isfinite(G))
+    ):
+        raise ValueError("W, X and G must contain finite values.")
+
+    # ---------------------------------------------------------
+    # 2. Compute the unnormalized embeddings.
+    # ---------------------------------------------------------
+
+    # Z = X @ W.T
+    #
+    # Each row contains one transformed observation.
+
+    Z = X @ W.T
+
+    # ---------------------------------------------------------
+    # 3. Normalize every embedding using the earlier unit_rows().
+    # ---------------------------------------------------------
+
+    E_hat, norms = unit_rows(Z)
+
+    # Use the same minimum divisor as unit_rows().
+    eps = 1e-12
+
+    safe_norms = np.maximum(norms, eps)
+
+    # ---------------------------------------------------------
+    # 4. Apply the derivative of L2 normalization.
+    # ---------------------------------------------------------
+
+    # For a nonzero embedding with norm > eps:
+    #
+    # e_hat = z / ||z||
+    #
+    # dL/dz = (G - (G . e_hat) * e_hat) / ||z||
+    #
+    # For norms <= eps, unit_rows uses a constant divisor eps.
+    # Its Jacobian is therefore I / eps.
+
+    grad_Z = np.empty_like(G)
+
+    small_norm = norms[:, 0] <= eps
+    regular_norm = ~small_norm
+
+    # Handle ordinary nonzero embeddings.
+    if np.any(regular_norm):
+
+        G_regular = G[regular_norm]
+        E_regular = E_hat[regular_norm]
+
+        norm_regular = safe_norms[regular_norm]
+
+        # Projection of G onto the normalized embedding.
+        projection = np.sum(
+            G_regular * E_regular,
+            axis=1,
+            keepdims=True
+        )
+
+        grad_Z[regular_norm] = (
+            G_regular - projection * E_regular
+        ) / norm_regular
+
+    # Handle zero or extremely small embeddings.
+    if np.any(small_norm):
+
+        grad_Z[small_norm] = G[small_norm] / eps
+
+    # ---------------------------------------------------------
+    # 5. Apply the chain rule through the linear transformation.
+    # ---------------------------------------------------------
+
+    # Z = X @ W.T
+    #
+    # Therefore:
+    #
+    # dL/dW = (dL/dZ).T @ X
+
+    grad_W = grad_Z.T @ X
+
+    return grad_W
+
+
+def train_embedding(
+    X,
+    y,
+    W0,
+    loss="triplet",
+    steps=300,
+    lr=0.003,
+    m=0.2,
+    tau=0.1,
+    mine="semi-hard",
+    n_classes=10,
+    n_per_class=2,
+    seed=0
+):
+    """Train a linear embedding on the unit sphere using class-balanced
+    mini-batches and one of the supported ranking losses.
+
+    Parameters
+    ----------
+    X : ndarray, shape (N, D)
+        Input training observations.
+
+    y : ndarray, shape (N,)
+        Original class labels. Labels may be non-contiguous.
+
+    W0 : ndarray, shape (L, D)
+        Initial linear transformation matrix.
+
+    loss : str, default="triplet"
+        Ranking loss:
+            'contrastive'
+            'triplet'
+            'npairs'
+            'centroid'
+
+    steps : int, default=300
+        Number of Adam optimization iterations.
+
+    lr : float, default=0.003
+        Adam learning rate.
+
+    m : float, default=0.2
+        Contrastive or triplet margin.
+
+    tau : float, default=0.1
+        N-pairs temperature.
+
+    mine : str, default="semi-hard"
+        Triplet mining strategy.
+
+    n_classes : int, default=10
+        Maximum number of classes per mini-batch.
+
+    n_per_class : int, default=2
+        Number of observations sampled per selected class.
+
+    seed : int, default=0
+        Random seed.
+
+    Returns
+    -------
+    W : ndarray, shape (L, D)
+        Optimized linear transformation matrix.
+
+    history : list of float
+        Training objective values recorded by Adam.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Convert and validate the input data.
+    # ---------------------------------------------------------
+
+    X = np.asarray(X, dtype=float)
+    y = np.asarray(y)
+    W0 = np.asarray(W0, dtype=float)
+
+    if X.ndim != 2:
+        raise ValueError("X must be a 2D array.")
+
+    if y.ndim != 1:
+        raise ValueError("y must be a 1D array.")
+
+    if W0.ndim != 2:
+        raise ValueError("W0 must be a 2D array.")
+
+    N, D = X.shape
+    L, W_D = W0.shape
+
+    if N == 0 or D == 0:
+        raise ValueError("X must contain observations and features.")
+
+    if L == 0:
+        raise ValueError("W0 must contain at least one embedding dimension.")
+
+    if len(y) != N:
+        raise ValueError("X and y must have the same number of observations.")
+
+    if W_D != D:
+        raise ValueError("W0 must have shape (L, D).")
+
+    if not (
+        np.all(np.isfinite(X))
+        and np.all(np.isfinite(W0))
+    ):
+        raise ValueError("X and W0 must contain finite values.")
+
+    # ---------------------------------------------------------
+    # 2. Validate the selected loss.
+    # ---------------------------------------------------------
+
+    valid_losses = (
+        "contrastive",
+        "triplet",
+        "npairs",
+        "centroid"
+    )
+
+    if loss not in valid_losses:
+        raise ValueError(
+            "Unknown loss. Choose 'contrastive', 'triplet', "
+            "'npairs', or 'centroid'."
+        )
+
+    # ---------------------------------------------------------
+    # 3. Map original labels to contiguous integer labels.
+    # ---------------------------------------------------------
+
+    # Real identity IDs may not be contiguous.
+    #
+    # Example:
+    # Original labels: [10, 10, 25, 25, 40, 40]
+    # Mapped labels:   [ 0,  0,  1,  1,  2,  2]
+
+    unique_labels, y_mapped = np.unique(
+        y,
+        return_inverse=True
+    )
+
+    C = len(unique_labels)
+
+    if C < 2:
+        raise ValueError("At least two distinct classes are required.")
+
+    # ---------------------------------------------------------
+    # 4. Validate the batch configuration.
+    # ---------------------------------------------------------
+
+    if (
+        isinstance(n_classes, (bool, np.bool_))
+        or not isinstance(n_classes, (int, np.integer))
+        or n_classes < 1
+    ):
+        raise ValueError("n_classes must be a positive integer.")
+
+    if (
+        isinstance(n_per_class, (bool, np.bool_))
+        or not isinstance(n_per_class, (int, np.integer))
+        or n_per_class < 1
+    ):
+        raise ValueError("n_per_class must be a positive integer.")
+
+    # ---------------------------------------------------------
+    # 5. Validate the centroid embedding dimension.
+    # ---------------------------------------------------------
+
+    # Centroid loss uses one-hot class centroids:
+    #
+    # centroids = np.eye(C)
+    #
+    # Therefore, the embedding dimension must equal C.
+
+    if loss == "centroid" and L != C:
+        raise ValueError(
+            "For centroid loss, W0 must have exactly C rows, "
+            "where C is the number of distinct classes."
+        )
+
+    # ---------------------------------------------------------
+    # 6. Create one random number generator for the whole call.
+    # ---------------------------------------------------------
+
+    rng = np.random.default_rng(seed)
+
+    # ---------------------------------------------------------
+    # 7. Define the stochastic mini-batch objective.
+    # ---------------------------------------------------------
+
+    def objective(W):
+        """Draw a fresh class-balanced batch and evaluate its loss."""
+
+        # Draw exactly one new batch per objective evaluation.
+        batch_indices = pk_batch(
+            y_mapped,
+            n_classes,
+            n_per_class,
+            rng
+        )
+
+        X_batch = X[batch_indices]
+        y_batch = y_mapped[batch_indices]
+
+        # -----------------------------------------------------
+        # 7a. Compute and normalize the batch embeddings.
+        # -----------------------------------------------------
+
+        # Z = X_batch @ W.T
+        Z = X_batch @ W.T
+
+        # Project every embedding onto the unit sphere.
+        E_hat, _ = unit_rows(Z)
+
+        # -----------------------------------------------------
+        # 7b. Compute the selected ranking loss.
+        # -----------------------------------------------------
+
+        if loss == "contrastive":
+
+            batch_loss, G = contrastive_loss(
+                E_hat,
+                y_batch,
+                m=m
+            )
+
+        elif loss == "triplet":
+
+            # Mine triplets using the selected mining strategy.
+            triplets = mine_triplets(
+                E_hat,
+                y_batch,
+                m=m,
+                mode=mine
+            )
+
+            batch_loss, G = triplet_loss(
+                E_hat,
+                triplets,
+                m=m
+            )
+
+        elif loss == "npairs":
+
+            batch_loss, G = npairs_loss(
+                E_hat,
+                y_batch,
+                tau=tau
+            )
+
+        else:  # loss == "centroid"
+
+            # One-hot centroids for all C original classes.
+            centroids = np.eye(C)
+
+            batch_loss, G = centroid_loss(
+                E_hat,
+                y_batch,
+                centroids
+            )
+
+        # -----------------------------------------------------
+        # 7c. Backpropagate through unit-sphere normalization.
+        # -----------------------------------------------------
+
+        grad_W = sphere_gradient(
+            W,
+            X_batch,
+            G
+        )
+
+        return batch_loss, grad_W
+
+    # ---------------------------------------------------------
+    # 8. Optimize the transformation matrix using Adam.
+    # ---------------------------------------------------------
+
+    W, history = fit_linear_metric(
+        objective,
+        W0,
+        steps=steps,
+        lr=lr
+    )
+
+    return W, history
+

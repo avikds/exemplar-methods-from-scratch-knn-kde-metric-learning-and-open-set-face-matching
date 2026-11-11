@@ -33,6 +33,7 @@ python scaffold.py
 - [x] **21.** triplet_loss
 - [x] **22.** npairs_loss
 - [x] **23.** centroid_loss
+- [x] **24.** train_embedding
 
 ---
 
