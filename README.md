@@ -24,6 +24,7 @@ python scaffold.py
 - [x] **12.** nadaraya_watson
 - [x] **13.** loo_nw_bandwidth
 - [x] **14.** loess
+- [x] **15.** nca_objective
 
 ---
 

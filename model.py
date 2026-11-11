@@ -2324,3 +2324,273 @@ def loess(x_train, y_train, x_query, h, kernel="gaussian"):
 
     return predictions
 
+# Step 15 - nca_objective
+def pair_gradient(W, X, A):
+    """Gradient with respect to W of:
+
+        sum_ij A[i,j] * ||W x_i - W x_j||^2
+
+    The matrix A is treated as fixed.
+
+    Parameters
+    ----------
+    W : ndarray, shape (L, D)
+        Linear transformation matrix.
+
+    X : ndarray, shape (N, D)
+        Input observations.
+
+    A : ndarray, shape (N, N)
+        Fixed pairwise weights.
+
+    Returns
+    -------
+    grad : ndarray, shape (L, D)
+        Gradient of the weighted pairwise distance objective.
+    """
+
+    # Convert inputs to floating-point NumPy arrays.
+    W = np.asarray(W, dtype=float)
+    X = np.asarray(X, dtype=float)
+    A = np.asarray(A, dtype=float)
+
+    # Validate dimensions.
+    if W.ndim != 2:
+        raise ValueError("W must be a 2D array.")
+
+    if X.ndim != 2:
+        raise ValueError("X must be a 2D array.")
+
+    if A.ndim != 2:
+        raise ValueError("A must be a 2D array.")
+
+    N, D = X.shape
+    L = W.shape[0]
+
+    if W.shape[1] != D:
+        raise ValueError("W and X must have compatible feature dimensions.")
+
+    if A.shape != (N, N):
+        raise ValueError("A must have shape (N, N).")
+
+    if N == 0 or D == 0 or L == 0:
+        raise ValueError("W and X must have non-empty dimensions.")
+
+    if not (
+        np.all(np.isfinite(W))
+        and np.all(np.isfinite(X))
+        and np.all(np.isfinite(A))
+    ):
+        raise ValueError("W, X and A must contain finite values.")
+
+    # ---------------------------------------------------------
+    # Derive the pairwise gradient using a shared matrix identity.
+    # ---------------------------------------------------------
+    #
+    # Let:
+    #
+    # S(W) = sum_ij A[i,j] ||W(x_i - x_j)||^2
+    #
+    # Its gradient is:
+    #
+    # dS/dW = 2 W sum_ij A[i,j](x_i-x_j)(x_i-x_j)^T
+    #
+    # Expanding the pairwise sum gives:
+    #
+    # B = X.T @ diag(A.sum(axis=1) + A.sum(axis=0)) @ X
+    #     - X.T @ (A + A.T) @ X
+    #
+    # We compute this without constructing a diagonal matrix
+    # and without looping over pairs of observations.
+
+    row_col_sum = A.sum(axis=1) + A.sum(axis=0)
+
+    term1 = X.T @ (row_col_sum[:, None] * X)
+
+    term2 = X.T @ (A + A.T) @ X
+
+    B = term1 - term2
+
+    # Exact analytical gradient.
+    grad = 2.0 * (W @ B)
+
+    return grad
+
+
+def nca_objective(W, X, y):
+    """Return (J, grad) for neighbourhood components analysis.
+
+    The objective is the expected number of correctly classified
+    points under the stochastic nearest-neighbour rule.
+
+    Parameters
+    ----------
+    W : ndarray, shape (L, D)
+        Linear transformation matrix.
+
+    X : ndarray, shape (N, D)
+        Training observations.
+
+    y : ndarray, shape (N,)
+        Class labels.
+
+    Returns
+    -------
+    J : float
+        NCA objective value.
+
+    grad : ndarray, shape (L, D)
+        Exact analytical gradient dJ/dW.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Convert and validate inputs.
+    # ---------------------------------------------------------
+
+    W = np.asarray(W, dtype=float)
+    X = np.asarray(X, dtype=float)
+    y = np.asarray(y).ravel()
+
+    if W.ndim != 2:
+        raise ValueError("W must be a 2D array.")
+
+    if X.ndim != 2:
+        raise ValueError("X must be a 2D array.")
+
+    N, D = X.shape
+    L = W.shape[0]
+
+    if N < 2:
+        raise ValueError("NCA requires at least two observations.")
+
+    if D == 0 or L == 0:
+        raise ValueError("W and X must have non-empty feature dimensions.")
+
+    if W.shape[1] != D:
+        raise ValueError("W must have shape (L, D).")
+
+    if len(y) != N:
+        raise ValueError("X and y must contain the same number of observations.")
+
+    if not (
+        np.all(np.isfinite(W))
+        and np.all(np.isfinite(X))
+    ):
+        raise ValueError("W and X must contain finite values.")
+
+    # ---------------------------------------------------------
+    # 2. Transform the observations using W.
+    # ---------------------------------------------------------
+
+    # Each transformed observation is:
+    #
+    # z_i = W x_i
+    #
+    # Since observations are stored row-wise:
+    #
+    # Z = X @ W.T
+
+    Z = X @ W.T
+
+    # ---------------------------------------------------------
+    # 3. Compute pairwise squared transformed distances.
+    # ---------------------------------------------------------
+
+    # Reuse pairwise_sq_dists() from Step 1.
+    #
+    # d_ij = ||W x_i - W x_j||^2
+
+    distances = pairwise_sq_dists(Z)
+
+    # Exclude self-neighbours.
+    # NCA considers only j != i.
+    np.fill_diagonal(distances, np.inf)
+
+    # ---------------------------------------------------------
+    # 4. Compute stable neighbour-selection probabilities.
+    # ---------------------------------------------------------
+
+    # p_ij = exp(-d_ij) / sum_{k != i} exp(-d_ik)
+    #
+    # Direct exponentiation can underflow when W is large.
+    # Subtract the smallest distance in each row before
+    # exponentiation. This is equivalent to log-sum-exp
+    # normalization because the common factor cancels.
+
+    min_distances = np.min(
+        distances,
+        axis=1,
+        keepdims=True
+    )
+
+    shifted_distances = distances - min_distances
+
+    with np.errstate(
+        under="ignore",
+        over="ignore",
+        invalid="ignore"
+    ):
+        exp_weights = np.exp(-shifted_distances)
+
+    # Normalize each row.
+    probabilities = exp_weights / np.sum(
+        exp_weights,
+        axis=1,
+        keepdims=True
+    )
+
+    # Explicitly ensure self-selection probabilities are zero.
+    np.fill_diagonal(probabilities, 0.0)
+
+    # ---------------------------------------------------------
+    # 5. Compute the NCA objective.
+    # ---------------------------------------------------------
+
+    # same[i,j] = 1 if observations i and j belong
+    # to the same class; otherwise 0.
+    same = (y[:, None] == y[None, :]).astype(float)
+
+    # Self-neighbours are excluded.
+    np.fill_diagonal(same, 0.0)
+
+    # J(W) = sum_i sum_{j:y_j=y_i} p_ij
+    J = float(np.sum(probabilities * same))
+
+    # ---------------------------------------------------------
+    # 6. Compute the probability of selecting a same-class
+    #    neighbour for each observation.
+    # ---------------------------------------------------------
+
+    # q_i = sum_{j:y_j=y_i} p_ij
+
+    p_same = np.sum(
+        probabilities * same,
+        axis=1,
+        keepdims=True
+    )
+
+    # ---------------------------------------------------------
+    # 7. Construct the fixed pairwise weight matrix A.
+    # ---------------------------------------------------------
+
+    # The NCA gradient can be expressed as:
+    #
+    # dJ/dW = - pair_gradient(W, X, A)
+    #
+    # where:
+    #
+    # A_ij = p_ij * (same_ij - q_i)
+    #
+    # This matrix captures the difference between selecting
+    # a same-class neighbour and selecting an arbitrary neighbour.
+
+    A = probabilities * (same - p_same)
+
+    # ---------------------------------------------------------
+    # 8. Calculate the exact analytical gradient.
+    # ---------------------------------------------------------
+
+    grad = -pair_gradient(W, X, A)
+
+    return J, grad
+
