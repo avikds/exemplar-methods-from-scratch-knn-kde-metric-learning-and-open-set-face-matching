@@ -22,6 +22,7 @@ python scaffold.py
 - [x] **10.** balloon_posterior
 - [x] **11.** kde_classifier
 - [x] **12.** nadaraya_watson
+- [x] **13.** loo_nw_bandwidth
 
 ---
 

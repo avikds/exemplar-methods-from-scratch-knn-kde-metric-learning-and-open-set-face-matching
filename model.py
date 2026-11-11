@@ -1948,3 +1948,173 @@ def nadaraya_watson(x_train, y_train, x_query, h, sigma=0.0):
 
     return mean, var
 
+# Step 13 - loo_nw_bandwidth
+def loo_nw_bandwidth(x, y, grid):
+    """Return (best_h, curve) where curve contains the leave-one-out
+    mean squared error of Nadaraya-Watson regression for each bandwidth.
+
+    Parameters
+    ----------
+    x : ndarray, shape (N,) or (N, D)
+        Training input observations.
+
+    y : ndarray, shape (N,)
+        Training target values. Flattened automatically.
+
+    grid : array-like, shape (n_bandwidths,)
+        Candidate positive bandwidth values.
+
+    Returns
+    -------
+    best_h : float
+        Bandwidth with the smallest leave-one-out mean squared error.
+
+    curve : ndarray
+        Float array containing one LOO MSE per bandwidth.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Convert inputs to NumPy arrays.
+    # ---------------------------------------------------------
+
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float).ravel()
+    grid = np.asarray(grid, dtype=float)
+
+    # Accept either 1-D or 2-D input features.
+    if x.ndim == 1:
+        x = x.reshape(-1, 1)
+    elif x.ndim != 2:
+        raise ValueError("x must be a 1-D or 2-D array.")
+
+    # ---------------------------------------------------------
+    # 2. Validate the input data.
+    # ---------------------------------------------------------
+
+    N, D = x.shape
+
+    if N < 2:
+        raise ValueError(
+            "At least two observations are required for leave-one-out validation."
+        )
+
+    if D == 0:
+        raise ValueError("x must contain at least one feature.")
+
+    if len(y) != N:
+        raise ValueError("x and y must contain the same number of observations.")
+
+    if not np.all(np.isfinite(x)):
+        raise ValueError("x must contain finite values.")
+
+    if not np.all(np.isfinite(y)):
+        raise ValueError("y must contain finite values.")
+
+    # ---------------------------------------------------------
+    # 3. Validate the bandwidth grid.
+    # ---------------------------------------------------------
+
+    if grid.ndim != 1 or grid.size == 0:
+        raise ValueError("grid must be a non-empty 1-D array.")
+
+    if not np.all(np.isfinite(grid)) or np.any(grid <= 0):
+        raise ValueError(
+            "Every bandwidth in grid must be positive and finite."
+        )
+
+    # ---------------------------------------------------------
+    # 4. Compute the pairwise squared-distance matrix ONCE.
+    # ---------------------------------------------------------
+
+    # Reuse pairwise_sq_dists() from Step 1.
+    #
+    # Shape: (N, N)
+
+    sq_dists = pairwise_sq_dists(x)
+
+    # Exclude each observation's self-distance.
+    #
+    # This ensures that every observation is predicted using
+    # all other observations, rather than itself.
+
+    np.fill_diagonal(sq_dists, np.inf)
+
+    # ---------------------------------------------------------
+    # 5. Prepare the leave-one-out calculations.
+    # ---------------------------------------------------------
+
+    # Store the minimum non-self squared distance for each row.
+    #
+    # Subtracting this minimum before exponentiation provides
+    # numerically stable Gaussian weights.
+
+    min_sq_dists = np.min(
+        sq_dists,
+        axis=1,
+        keepdims=True
+    )
+
+    # Difference from the nearest non-self observation.
+    shifted_dists = sq_dists - min_sq_dists
+
+    # Store one MSE for each candidate bandwidth.
+    curve = np.empty(len(grid), dtype=float)
+
+    # ---------------------------------------------------------
+    # 6. Evaluate every candidate bandwidth.
+    # ---------------------------------------------------------
+
+    for i, h in enumerate(grid):
+
+        # Gaussian kernel exponent:
+        #
+        # exp(-||x_i - x_j||^2 / (2*h^2))
+        #
+        # Subtracting the minimum squared distance does not
+        # change the normalized weights.
+        #
+        # Divide sequentially by h to avoid underflow in h**2
+        # for extremely small positive bandwidths.
+
+        with np.errstate(
+            over="ignore",
+            under="ignore",
+            divide="ignore",
+            invalid="ignore"
+        ):
+            exponent = (shifted_dists / h) / (2.0 * h)
+
+            weights = np.exp(-exponent)
+
+        # Normalize the weights for each left-out observation.
+        row_sums = np.sum(weights, axis=1, keepdims=True)
+
+        normalized_weights = weights / row_sums
+
+        # -----------------------------------------------------
+        # 7. Compute the leave-one-out predictions.
+        # -----------------------------------------------------
+
+        # Each row i contains the normalized weights for
+        # predicting y_i using all observations except i.
+
+        y_pred = normalized_weights @ y
+
+        # -----------------------------------------------------
+        # 8. Calculate the leave-one-out mean squared error.
+        # -----------------------------------------------------
+
+        errors = y - y_pred
+
+        curve[i] = np.mean(errors**2)
+
+    # ---------------------------------------------------------
+    # 9. Select the bandwidth with the smallest LOO MSE.
+    # ---------------------------------------------------------
+
+    best_index = int(np.argmin(curve))
+
+    best_h = float(grid[best_index])
+
+    return best_h, curve
+
