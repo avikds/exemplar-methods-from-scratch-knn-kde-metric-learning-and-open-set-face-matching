@@ -2118,3 +2118,209 @@ def loo_nw_bandwidth(x, y, grid):
 
     return best_h, curve
 
+# Step 14 - loess
+def loess(x_train, y_train, x_query, h, kernel="gaussian"):
+    """Return locally linear regression predictions (eq 16.47).
+
+    At every query point x0, fit a weighted least-squares line:
+
+        y = beta[0] + beta[1] * x
+
+    using kernel weights:
+
+        w_i = K((x0 - x_train[i]) / h)
+
+    Parameters
+    ----------
+    x_train : array-like
+        One-dimensional training inputs.
+
+    y_train : array-like
+        Training target values.
+
+    x_query : array-like
+        Query points where predictions are required.
+
+    h : float
+        Positive kernel bandwidth.
+
+    kernel : str, default="gaussian"
+        Kernel name accepted by density_kernel():
+        'gaussian', 'boxcar', 'epanechnikov', or 'tricube'.
+
+    Returns
+    -------
+    predictions : ndarray
+        One locally linear regression prediction per query point.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Convert inputs to flattened NumPy arrays.
+    # ---------------------------------------------------------
+
+    x_train = np.asarray(x_train, dtype=float).ravel()
+    y_train = np.asarray(y_train, dtype=float).ravel()
+    x_query = np.asarray(x_query, dtype=float).ravel()
+
+    # ---------------------------------------------------------
+    # 2. Validate input data.
+    # ---------------------------------------------------------
+
+    if x_train.size == 0:
+        raise ValueError("x_train must not be empty.")
+
+    if x_train.size != y_train.size:
+        raise ValueError(
+            "x_train and y_train must have the same number of observations."
+        )
+
+    if not np.all(np.isfinite(x_train)):
+        raise ValueError("x_train must contain finite values.")
+
+    if not np.all(np.isfinite(y_train)):
+        raise ValueError("y_train must contain finite values.")
+
+    if not np.all(np.isfinite(x_query)):
+        raise ValueError("x_query must contain finite values.")
+
+    # ---------------------------------------------------------
+    # 3. Validate the bandwidth.
+    # ---------------------------------------------------------
+
+    try:
+        h = float(h)
+    except (TypeError, ValueError):
+        raise ValueError("h must be a positive finite number.")
+
+    if not np.isfinite(h) or h <= 0:
+        raise ValueError("h must be a positive finite number.")
+
+    # Validate the kernel name using the earlier function.
+    density_kernel(np.array([0.0]), name=kernel)
+
+    # ---------------------------------------------------------
+    # 4. Construct the linear design matrix.
+    # ---------------------------------------------------------
+
+    # phi(x) = [1, x]
+    #
+    # Each training observation has two basis features:
+    # an intercept and a slope.
+
+    Phi = np.column_stack([
+        np.ones(x_train.size),
+        x_train
+    ])
+
+    # Store one prediction per query.
+    predictions = np.empty(x_query.size, dtype=float)
+
+    # ---------------------------------------------------------
+    # 5. Perform a separate weighted linear fit for each query.
+    # ---------------------------------------------------------
+
+    for i, x0 in enumerate(x_query):
+
+        # Compute the standardized differences.
+        u = (x0 - x_train) / h
+
+        # Evaluate the selected kernel.
+        weights = density_kernel(u, name=kernel)
+
+        # -----------------------------------------------------
+        # 6. Stabilize the weights.
+        # -----------------------------------------------------
+
+        # Multiplying all weights by the same positive constant
+        # does not change the weighted least-squares solution.
+        #
+        # Therefore, divide by the maximum weight whenever
+        # at least one kernel weight is positive.
+
+        max_weight = np.max(weights)
+
+        if max_weight > 0:
+
+            weights = weights / max_weight
+
+        elif kernel == "gaussian":
+
+            # Gaussian weights may all underflow to zero for
+            # queries far away from the training observations.
+            #
+            # Use an equivalent log-space Gaussian expression.
+
+            with np.errstate(over="ignore", invalid="ignore"):
+                log_weights = -0.5 * u**2
+
+            max_log_weight = np.max(log_weights)
+
+            if np.isfinite(max_log_weight):
+
+                weights = np.exp(
+                    log_weights - max_log_weight
+                )
+
+            else:
+
+                # Extreme floating-point inputs can overflow
+                # even the squared standardized differences.
+                # Retain the nearest training observation(s).
+                distances = np.abs(x0 - x_train)
+                minimum_distance = np.min(distances)
+
+                weights = (
+                    distances == minimum_distance
+                ).astype(float)
+
+        # -----------------------------------------------------
+        # 7. Construct the weighted normal equations.
+        # -----------------------------------------------------
+
+        # Solve:
+        #
+        # beta = argmin sum_j w_j *
+        #        (y_j - beta[0] - beta[1]*x_j)^2
+        #
+        # Normal equations:
+        #
+        # A = Phi.T @ W @ Phi
+        # b = Phi.T @ W @ y
+        #
+        # Use weighted multiplication instead of explicitly
+        # constructing the diagonal matrix W.
+
+        A = Phi.T @ (weights[:, None] * Phi)
+
+        b = Phi.T @ (weights * y_train)
+
+        # -----------------------------------------------------
+        # 8. Solve the normal equations using least squares.
+        # -----------------------------------------------------
+
+        # IMPORTANT:
+        # Do not use np.linalg.inv(A).
+        #
+        # Compact kernels may leave too few observations in the
+        # window, making A singular or rank deficient.
+        #
+        # np.linalg.lstsq handles these cases safely.
+
+        beta = np.linalg.lstsq(
+            A,
+            b,
+            rcond=None
+        )[0]
+
+        # -----------------------------------------------------
+        # 9. Predict at the query point.
+        # -----------------------------------------------------
+
+        # mu(x0) = beta[0] + beta[1] * x0
+
+        phi_query = np.array([1.0, x0])
+
+        predictions[i] = phi_query @ beta
+
+    return predictions
+

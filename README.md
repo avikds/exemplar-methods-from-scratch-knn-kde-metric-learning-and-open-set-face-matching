@@ -23,6 +23,7 @@ python scaffold.py
 - [x] **11.** kde_classifier
 - [x] **12.** nadaraya_watson
 - [x] **13.** loo_nw_bandwidth
+- [x] **14.** loess
 
 ---
 
