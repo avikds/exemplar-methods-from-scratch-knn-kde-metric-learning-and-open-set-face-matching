@@ -559,3 +559,111 @@ def one_nn_vs_bayes(delta, D, Ns, n_test=2000, seed=0):
         "errors": errors
     }
 
+# Step 5 - cube_edge_length
+def cube_edge_length(p, D, N=100000, seed=0):
+    """Return (theory, empirical), the edge length of a centred cube
+    holding a fraction p of uniformly distributed data.
+
+    Parameters
+    ----------
+    p : float
+        Fraction of data points to be contained in the cube.
+
+    D : int
+        Number of dimensions.
+
+    N : int, default=100000
+        Number of uniformly distributed samples.
+
+    seed : int, default=0
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    theory : float
+        Theoretical cube edge length, p**(1/D).
+
+    empirical : float
+        Empirical cube edge length estimated using simulated data.
+    """
+
+    # Validate the requested fraction.
+    if not np.isscalar(p) or not np.isfinite(p) or not (0 < p <= 1):
+        raise ValueError("p must be a finite number in the interval (0, 1].")
+
+    # Validate dimensionality.
+    if (
+        isinstance(D, (bool, np.bool_))
+        or not isinstance(D, (int, np.integer))
+        or D < 1
+    ):
+        raise ValueError("D must be a positive integer.")
+
+    # Validate sample size.
+    if (
+        isinstance(N, (bool, np.bool_))
+        or not isinstance(N, (int, np.integer))
+        or N < 1
+    ):
+        raise ValueError("N must be a positive integer.")
+
+    # ---------------------------------------------------------
+    # 1. Compute the theoretical cube edge length.
+    # ---------------------------------------------------------
+
+    # For uniformly distributed points in the D-dimensional
+    # unit cube, the probability of falling inside a centred
+    # cube of edge length e is:
+    #
+    # p = e**D
+    #
+    # Therefore:
+    #
+    # e = p**(1/D)
+
+    theory = p ** (1.0 / D)
+
+    # ---------------------------------------------------------
+    # 2. Generate uniformly distributed random samples.
+    # ---------------------------------------------------------
+
+    rng = np.random.default_rng(seed)
+
+    X = rng.uniform(size=(N, D))
+
+    # ---------------------------------------------------------
+    # 3. Compute the L-infinity (sup-norm) distance from
+    #    every point to the centre of the unit cube.
+    # ---------------------------------------------------------
+
+    # The centre of the unit cube is (0.5, 0.5, ..., 0.5).
+    #
+    # The sup-norm distance is the maximum absolute coordinate
+    # difference from the centre.
+
+    distances = np.max(np.abs(X - 0.5), axis=1)
+
+    # ---------------------------------------------------------
+    # 4. Sort the distances in ascending order.
+    # ---------------------------------------------------------
+
+    distances = np.sort(distances)
+
+    # ---------------------------------------------------------
+    # 5. Determine the number of points to include.
+    # ---------------------------------------------------------
+
+    # Use the 1-based kth position specified in the instructions.
+    k = max(1, round(p * N))
+
+    # ---------------------------------------------------------
+    # 6. Calculate the empirical cube edge length.
+    # ---------------------------------------------------------
+
+    # The distance is measured from the centre to a cube face.
+    # Therefore, the complete edge length is twice this distance.
+
+    empirical = 2.0 * distances[k - 1]
+
+    return float(theory), float(empirical)
+
