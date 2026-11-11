@@ -13,6 +13,7 @@ python scaffold.py
 - [x] **1.** pairwise_sq_dists
 - [x] **2.** knn_proba
 - [x] **3.** error_vs_k
+- [x] **4.** one_nn_vs_bayes
 
 ---
 

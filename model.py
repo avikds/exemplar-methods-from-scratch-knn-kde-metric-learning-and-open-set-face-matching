@@ -328,3 +328,234 @@ def error_vs_k(X_train, y_train, X_test, y_test, ks):
     # Return float NumPy arrays.
     return np.asarray(train_err, dtype=float), np.asarray(test_err, dtype=float)
 
+# Step 4 - one_nn_vs_bayes
+import math
+
+
+def one_nn_vs_bayes(delta, D, Ns, n_test=2000, seed=0):
+    """Measure the 1-NN test error and compare it with the Bayes error.
+
+    The data distribution is:
+
+        y ~ Bernoulli(0.5)
+
+        x | y=1 ~ N((+delta, 0, ..., 0), I)
+        x | y=0 ~ N((-delta, 0, ..., 0), I)
+
+    Only the first coordinate contains class information.
+
+    Parameters
+    ----------
+    delta : float
+        Separation between the class means along the first coordinate.
+
+    D : int
+        Number of feature dimensions.
+
+    Ns : iterable of int
+        Training sample sizes to evaluate.
+
+    n_test : int, default=2000
+        Number of test observations.
+
+    seed : int, default=0
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    result : dict
+        Dictionary containing:
+
+        'bayes'     : Exact Bayes classification error.
+        'bound'     : Cover-Hart bound, 2*R*(1-R).
+        'asymptote' : Exact large-sample 1-NN error, computed numerically.
+        'errors'    : Measured 1-NN test error for each training size.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Validate inputs
+    # ---------------------------------------------------------
+
+    if not np.isscalar(delta) or not np.isfinite(delta) or delta < 0:
+        raise ValueError("delta must be a finite non-negative scalar.")
+
+    if (
+        isinstance(D, (bool, np.bool_))
+        or not isinstance(D, (int, np.integer))
+        or D < 1
+    ):
+        raise ValueError("D must be a positive integer.")
+
+    if (
+        isinstance(n_test, (bool, np.bool_))
+        or not isinstance(n_test, (int, np.integer))
+        or n_test < 1
+    ):
+        raise ValueError("n_test must be a positive integer.")
+
+    Ns = list(Ns)
+
+    for N in Ns:
+        if (
+            isinstance(N, (bool, np.bool_))
+            or not isinstance(N, (int, np.integer))
+            or N < 1
+        ):
+            raise ValueError("Every training size in Ns must be a positive integer.")
+
+    delta = float(delta)
+    D = int(D)
+    n_test = int(n_test)
+
+    # ---------------------------------------------------------
+    # 2. Compute the exact Bayes error
+    # ---------------------------------------------------------
+
+    # R* = Phi(-delta)
+    # Use the complementary error function for numerical accuracy.
+
+    bayes = 0.5 * math.erfc(delta / math.sqrt(2.0))
+
+    # Cover-Hart asymptotic upper bound.
+    bound = 2.0 * bayes * (1.0 - bayes)
+
+    # ---------------------------------------------------------
+    # 3. Compute the exact large-sample 1-NN asymptote
+    # ---------------------------------------------------------
+
+    # The posterior probability of class 1 is:
+    #
+    # eta(x) = P(y=1 | x)
+    #        = 1 / (1 + exp(-2 * delta * x))
+    #
+    # Using tanh gives a numerically stable equivalent:
+    #
+    # eta(x) = 0.5 * (1 + tanh(delta * x))
+
+    # The marginal density of the informative coordinate is:
+    #
+    # p(x) = 0.5 * N(x; +delta, 1)
+    #      + 0.5 * N(x; -delta, 1)
+
+    # Construct the required uniform integration grid.
+    grid = np.linspace(-12.0, 12.0, 24001)
+
+    # Posterior probability of class 1.
+    eta = 0.5 * (1.0 + np.tanh(delta * grid))
+
+    # Standard normal density normalization constant.
+    normal_const = 1.0 / math.sqrt(2.0 * math.pi)
+
+    # Conditional densities for the two classes.
+    density_class_1 = (
+        normal_const
+        * np.exp(-0.5 * (grid - delta) ** 2)
+    )
+
+    density_class_0 = (
+        normal_const
+        * np.exp(-0.5 * (grid + delta) ** 2)
+    )
+
+    # Marginal density of the first coordinate.
+    p_x = 0.5 * (density_class_1 + density_class_0)
+
+    # Asymptotic 1-NN error:
+    #
+    # R_1NN = integral 2 * eta(x) * (1 - eta(x)) * p(x) dx
+
+    integrand = 2.0 * eta * (1.0 - eta) * p_x
+
+    # Composite trapezoidal integration.
+    dx = grid[1] - grid[0]
+
+    asymptote = dx * np.sum(
+        0.5 * (integrand[:-1] + integrand[1:])
+    )
+
+    # ---------------------------------------------------------
+    # 4. Initialize the random number generator
+    # ---------------------------------------------------------
+
+    rng = np.random.default_rng(seed)
+
+    # ---------------------------------------------------------
+    # 5. Define the data-generation function
+    # ---------------------------------------------------------
+
+    def draw_sample(n):
+        """Generate n observations from the specified distribution."""
+
+        # Draw labels first, exactly as specified.
+        y = rng.integers(0, 2, size=n)
+
+        # Generate independent standard normal coordinates.
+        X = rng.normal(size=(n, D))
+
+        # Shift the first coordinate according to the label.
+        #
+        # y=0 -> mean -delta
+        # y=1 -> mean +delta
+        X[:, 0] += np.where(y == 1, delta, -delta)
+
+        return X, y
+
+    # ---------------------------------------------------------
+    # 6. Draw the test set FIRST
+    # ---------------------------------------------------------
+
+    X_test, y_test = draw_sample(n_test)
+
+    # Store measured 1-NN test errors.
+    errors = []
+
+    # ---------------------------------------------------------
+    # 7. Evaluate each training sample size
+    # ---------------------------------------------------------
+
+    for N in Ns:
+
+        # Draw one fresh training set for this sample size.
+        X_train, y_train = draw_sample(int(N))
+
+        # Store predictions for all test observations.
+        y_pred = np.empty(n_test, dtype=int)
+
+        # Process test observations in batches to avoid allocating
+        # an unnecessarily large distance matrix.
+        batch_size = min(256, n_test)
+
+        for start in range(0, n_test, batch_size):
+
+            end = min(start + batch_size, n_test)
+
+            # Compute pairwise squared Euclidean distances.
+            # The Mahalanobis matrix is omitted, so M=None.
+            distances = pairwise_sq_dists(
+                X_test[start:end],
+                X_train
+            )
+
+            # Find the index of the single nearest training point.
+            # np.argmin returns the first index in case of a tie.
+            nearest_indices = np.argmin(distances, axis=1)
+
+            # Assign the label of the nearest neighbour.
+            y_pred[start:end] = y_train[nearest_indices]
+
+        # Measure test misclassification rate.
+        test_error = np.mean(y_pred != y_test)
+
+        errors.append(float(test_error))
+
+    # ---------------------------------------------------------
+    # 8. Return all theoretical and measured results
+    # ---------------------------------------------------------
+
+    return {
+        "bayes": float(bayes),
+        "bound": float(bound),
+        "asymptote": float(asymptote),
+        "errors": errors
+    }
+
