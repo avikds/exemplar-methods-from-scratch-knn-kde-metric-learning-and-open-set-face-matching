@@ -18,6 +18,7 @@ python scaffold.py
 - [x] **6.** noise_dimension_curve
 - [x] **7.** kde_density
 - [x] **8.** silverman_bandwidth
+- [x] **9.** kde_logpdf
 
 ---
 

@@ -1050,3 +1050,242 @@ def silverman_bandwidth(X):
 
     return float(bandwidth)
 
+# Step 9 - kde_logpdf
+def kde_logpdf(X_train, X_query, h, leave_one_out=False):
+    """Return the Gaussian KDE log density at each query (eq 16.30, 16.33).
+
+    Parameters
+    ----------
+    X_train : ndarray, shape (N, D) or (N,)
+        Training observations.
+
+    X_query : ndarray, shape (M, D) or (M,)
+        Query observations.
+
+    h : float
+        Positive Gaussian kernel bandwidth.
+
+    leave_one_out : bool, default=False
+        If True, exclude training point i when evaluating query point i.
+        X_query must then correspond row-by-row to X_train.
+
+    Returns
+    -------
+    log_density : ndarray, shape (M,)
+        Gaussian KDE log density evaluated at each query point.
+    """
+
+    # Convert inputs to floating-point arrays.
+    X_train = np.asarray(X_train, dtype=float)
+    X_query = np.asarray(X_query, dtype=float)
+
+    # Treat 1-D inputs as one-dimensional feature vectors.
+    if X_train.ndim == 1:
+        X_train = X_train.reshape(-1, 1)
+    elif X_train.ndim != 2:
+        raise ValueError("X_train must be a 1-D or 2-D array.")
+
+    if X_query.ndim == 1:
+        X_query = X_query.reshape(-1, 1)
+    elif X_query.ndim != 2:
+        raise ValueError("X_query must be a 1-D or 2-D array.")
+
+    # Validate the data.
+    if X_train.shape[0] == 0:
+        raise ValueError("X_train must contain at least one observation.")
+
+    if X_train.shape[1] != X_query.shape[1]:
+        raise ValueError("X_train and X_query must have the same feature dimension.")
+
+    if not np.all(np.isfinite(X_train)):
+        raise ValueError("X_train must contain finite values.")
+
+    if not np.all(np.isfinite(X_query)):
+        raise ValueError("X_query must contain finite values.")
+
+    # Validate the bandwidth.
+    try:
+        h = float(h)
+    except (TypeError, ValueError):
+        raise ValueError("h must be a positive finite number.")
+
+    if not np.isfinite(h) or h <= 0:
+        raise ValueError("h must be a positive finite number.")
+
+    # Number of training observations and feature dimensions.
+    N, D = X_train.shape
+    n_query = X_query.shape[0]
+
+    # Determine the number of training observations contributing
+    # to each density estimate.
+    if leave_one_out:
+        if n_query != N:
+            raise ValueError(
+                "In leave-one-out mode, X_query must have "
+                "the same number of rows as X_train."
+            )
+
+        if N < 2:
+            raise ValueError(
+                "Leave-one-out KDE requires at least two training observations."
+            )
+
+        n_components = N - 1
+
+    else:
+        n_components = N
+
+    # ---------------------------------------------------------
+    # 1. Compute pairwise squared Euclidean distances.
+    # ---------------------------------------------------------
+
+    # Reuse the pairwise distance function from Step 1.
+    #
+    # Shape: (n_query, N)
+    sq_dists = pairwise_sq_dists(X_query, X_train)
+
+    # ---------------------------------------------------------
+    # 2. Compute Gaussian log-kernel values.
+    # ---------------------------------------------------------
+
+    # Gaussian KDE:
+    #
+    # p(x) = (1 / N) * sum_i [
+    #     (1 / (h * sqrt(2*pi))^D)
+    #     * exp(-||x - x_i||^2 / (2*h^2))
+    # ]
+    #
+    # Work directly with logarithms to avoid underflow.
+
+    log_kernel = -sq_dists / (2.0 * h**2)
+
+    # ---------------------------------------------------------
+    # 3. Apply leave-one-out exclusion when requested.
+    # ---------------------------------------------------------
+
+    if leave_one_out:
+        # Row i represents query X_train[i].
+        # Remove its self-contribution from the density estimate.
+        np.fill_diagonal(log_kernel, -np.inf)
+
+    # ---------------------------------------------------------
+    # 4. Compute log-sum-exp in a numerically stable way.
+    # ---------------------------------------------------------
+
+    # For each query:
+    #
+    # log(sum_i exp(a_i))
+    # = max(a_i) + log(sum_i exp(a_i - max(a_i)))
+    #
+    # Subtracting the maximum prevents overflow.
+    # At least one exponential in each row is exactly 1,
+    # preventing underflow of the entire sum.
+
+    max_log_kernel = np.max(log_kernel, axis=1, keepdims=True)
+
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        shifted_sum = np.sum(
+            np.exp(log_kernel - max_log_kernel),
+            axis=1
+        )
+
+        log_sum_exp = (
+            max_log_kernel.ravel()
+            + np.log(shifted_sum)
+        )
+
+    # ---------------------------------------------------------
+    # 5. Add the Gaussian normalization constants.
+    # ---------------------------------------------------------
+
+    # log p(x) =
+    #
+    # logsumexp(log_kernel)
+    # - log(number of contributing samples)
+    # - D*log(h)
+    # - (D/2)*log(2*pi)
+
+    log_density = (
+        log_sum_exp
+        - np.log(n_components)
+        - D * np.log(h)
+        - 0.5 * D * np.log(2.0 * np.pi)
+    )
+
+    return log_density
+
+
+def loo_bandwidth(X, grid):
+    """Return (best_h, curve) using leave-one-out KDE log likelihood.
+
+    Parameters
+    ----------
+    X : ndarray, shape (N, D) or (N,)
+        Training observations.
+
+    grid : array-like
+        Candidate positive bandwidth values.
+
+    Returns
+    -------
+    best_h : float
+        Bandwidth with the highest mean leave-one-out log density.
+
+    curve : ndarray
+        Mean leave-one-out log density for every bandwidth in grid.
+    """
+
+    # Convert the candidate bandwidths into a NumPy array.
+    grid = np.asarray(grid, dtype=float)
+
+    # Validate the bandwidth grid.
+    if grid.ndim != 1 or grid.size == 0:
+        raise ValueError("grid must be a non-empty 1-D array.")
+
+    if not np.all(np.isfinite(grid)) or np.any(grid <= 0):
+        raise ValueError(
+            "Every bandwidth in grid must be positive and finite."
+        )
+
+    # Convert the input observations to an array.
+    X = np.asarray(X, dtype=float)
+
+    if X.ndim not in (1, 2):
+        raise ValueError("X must be a 1-D or 2-D array.")
+
+    if X.shape[0] < 2:
+        raise ValueError(
+            "Leave-one-out bandwidth selection requires at least two observations."
+        )
+
+    # Store mean leave-one-out log likelihoods.
+    curve = np.empty(len(grid), dtype=float)
+
+    # ---------------------------------------------------------
+    # Evaluate each candidate bandwidth.
+    # ---------------------------------------------------------
+
+    for i, h in enumerate(grid):
+
+        # Evaluate every observation using a KDE that excludes
+        # that observation from its own density estimate.
+        log_densities = kde_logpdf(
+            X,
+            X,
+            h,
+            leave_one_out=True
+        )
+
+        # Mean leave-one-out log likelihood.
+        curve[i] = np.mean(log_densities)
+
+    # ---------------------------------------------------------
+    # Select the bandwidth with the largest LOO log likelihood.
+    # ---------------------------------------------------------
+
+    best_index = int(np.argmax(curve))
+
+    best_h = float(grid[best_index])
+
+    return best_h, curve
+
