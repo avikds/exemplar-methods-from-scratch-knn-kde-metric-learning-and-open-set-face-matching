@@ -215,3 +215,116 @@ def knn_proba(X_train, y_train, X_query, K, n_classes=None, M=None):
 
     return proba
 
+# Step 3 - error_vs_k
+def error_vs_k(X_train, y_train, X_test, y_test, ks):
+    """Return (train_err, test_err), the misclassification rates for each K in ks.
+
+    Training points are classified against the complete training set,
+    including themselves, as required for reproducing the book's curves.
+
+    Parameters
+    ----------
+    X_train : ndarray, shape (n_train, n_features)
+        Training feature vectors.
+
+    y_train : ndarray, shape (n_train,)
+        Integer training labels starting from 0.
+
+    X_test : ndarray, shape (n_test, n_features)
+        Test feature vectors.
+
+    y_test : ndarray, shape (n_test,)
+        Integer test labels.
+
+    ks : iterable
+        Values of K (number of nearest neighbours) to evaluate.
+
+    Returns
+    -------
+    train_err : ndarray, shape (len(ks),)
+        Training misclassification rate for each K.
+
+    test_err : ndarray, shape (len(ks),)
+        Test misclassification rate for each K.
+    """
+
+    # Convert inputs to NumPy arrays.
+    X_train = np.asarray(X_train, dtype=float)
+    y_train = np.asarray(y_train)
+
+    X_test = np.asarray(X_test, dtype=float)
+    y_test = np.asarray(y_test)
+
+    # Validate label dimensions.
+    if y_train.ndim != 1 or y_test.ndim != 1:
+        raise ValueError("y_train and y_test must be 1D arrays.")
+
+    if len(X_train) != len(y_train):
+        raise ValueError("X_train and y_train must have the same number of samples.")
+
+    if len(X_test) != len(y_test):
+        raise ValueError("X_test and y_test must have the same number of samples.")
+
+    if len(X_train) == 0:
+        raise ValueError("The training set must not be empty.")
+
+    if len(X_test) == 0:
+        raise ValueError("The test set must not be empty.")
+
+    # Validate class labels.
+    if not np.issubdtype(y_train.dtype, np.integer):
+        raise ValueError("y_train must contain integer class labels.")
+
+    if not np.issubdtype(y_test.dtype, np.integer):
+        raise ValueError("y_test must contain integer class labels.")
+
+    if np.any(y_train < 0) or np.any(y_test < 0):
+        raise ValueError("Class labels must be non-negative.")
+
+    # Convert ks to a list so that it can be iterated over consistently.
+    ks = list(ks)
+
+    # Include every class label appearing in either dataset.
+    # This also handles test classes absent from the training set.
+    n_classes = int(max(y_train.max(), y_test.max())) + 1
+
+    # Store training and test errors for each K.
+    train_err = []
+    test_err = []
+
+    for K in ks:
+
+        # Classify training points against the FULL training set.
+        # Each training point is included among its own neighbours.
+        train_proba = knn_proba(
+            X_train,
+            y_train,
+            X_train,
+            K,
+            n_classes=n_classes
+        )
+
+        # Classify test points using the training set.
+        test_proba = knn_proba(
+            X_train,
+            y_train,
+            X_test,
+            K,
+            n_classes=n_classes
+        )
+
+        # Predict the class with the highest KNN probability.
+        # np.argmax selects the smallest class index in case of a tie.
+        y_train_pred = np.argmax(train_proba, axis=1)
+        y_test_pred = np.argmax(test_proba, axis=1)
+
+        # Calculate misclassification rates.
+        train_error = np.mean(y_train_pred != y_train)
+        test_error = np.mean(y_test_pred != y_test)
+
+        train_err.append(train_error)
+        test_err.append(test_error)
+
+    # Return float NumPy arrays.
+    return np.asarray(train_err, dtype=float), np.asarray(test_err, dtype=float)
+

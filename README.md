@@ -12,6 +12,7 @@ python scaffold.py
 
 - [x] **1.** pairwise_sq_dists
 - [x] **2.** knn_proba
+- [x] **3.** error_vs_k
 
 ---
 
