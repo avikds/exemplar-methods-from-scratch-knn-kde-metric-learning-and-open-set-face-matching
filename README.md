@@ -36,6 +36,7 @@ python scaffold.py
 - [x] **24.** train_embedding
 - [x] **25.** open_set_predict
 - [x] **26.** tune_threshold
+- [x] **27.** face_bakeoff
 
 ---
 

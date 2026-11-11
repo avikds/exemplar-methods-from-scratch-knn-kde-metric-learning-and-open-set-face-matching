@@ -5435,3 +5435,613 @@ def tune_threshold(gallery, gallery_ids, probes, true):
 
     return tau, best
 
+# Step 27 - face_bakeoff
+def open_set_trial(embed, X, ids, split, seed=0):
+    """Run one open-set face recognition experiment.
+
+    The experiment:
+      1. Builds a calibration gallery and calibration probes.
+      2. Tunes the rejection threshold on the calibration set.
+      3. Builds an independent test gallery and test probes.
+      4. Measures open-set recognition performance.
+      5. Calculates rank-1 accuracy, AUC and oracle performance.
+
+    Parameters
+    ----------
+    embed : callable
+        Function mapping raw observations to embedding vectors.
+
+    X : ndarray, shape (N, D)
+        Raw observations.
+
+    ids : ndarray, shape (N,)
+        Identity ID corresponding to each observation.
+
+    split : dict
+        Dictionary containing:
+        'train', 'calib', 'enrolled', 'impostors'.
+
+    seed : int, default=0
+        Random seed.
+
+    Returns
+    -------
+    result : dict
+        Dictionary containing:
+        dir, far, balanced, rank1, auc, tau, oracle.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Convert and validate the input data.
+    # ---------------------------------------------------------
+
+    X = np.asarray(X, dtype=float)
+    ids = np.asarray(ids)
+
+    if X.ndim != 2:
+        raise ValueError("X must be a 2D array.")
+
+    if ids.ndim != 1:
+        raise ValueError("ids must be a 1D array.")
+
+    if len(X) != len(ids):
+        raise ValueError("X and ids must have the same number of rows.")
+
+    if len(X) == 0:
+        raise ValueError("X must not be empty.")
+
+    if not np.all(np.isfinite(X)):
+        raise ValueError("X must contain finite values.")
+
+    required_keys = ("train", "calib", "enrolled", "impostors")
+
+    for key in required_keys:
+        if key not in split:
+            raise ValueError(f"split must contain the key '{key}'.")
+
+    # ---------------------------------------------------------
+    # 2. Create exactly one random number generator.
+    # ---------------------------------------------------------
+
+    rng = np.random.default_rng(seed)
+
+    # ---------------------------------------------------------
+    # 3. Compute embeddings for the observations.
+    # ---------------------------------------------------------
+
+    # The embedding function maps raw observations to their
+    # corresponding learned feature representations.
+
+    E = np.asarray(embed(X), dtype=float)
+
+    if E.ndim != 2 or E.shape[0] != len(X):
+        raise ValueError(
+            "embed(X) must return a 2D array with one row per observation."
+        )
+
+    if E.shape[1] == 0 or not np.all(np.isfinite(E)):
+        raise ValueError("The embeddings must be finite and non-empty.")
+
+    # ---------------------------------------------------------
+    # 4. Define the gallery/probe scene builder.
+    # ---------------------------------------------------------
+
+    def build_scene(enrolled_people, impostor_people):
+        """Build a gallery and corresponding probe set.
+
+        For every enrolled person:
+          - Randomly select one image for the gallery.
+          - Use all remaining images as probes.
+
+        For every impostor:
+          - Use every image as a probe with true ID -1.
+        """
+
+        gallery_rows = []
+        gallery_labels = []
+
+        probe_rows = []
+        probe_labels = []
+
+        # -----------------------------------------------------
+        # 4a. Build the enrolled gallery and enrolled probes.
+        # -----------------------------------------------------
+
+        for person in enrolled_people:
+
+            # Find all rows belonging to this identity.
+            idx = np.flatnonzero(ids == person)
+
+            if len(idx) == 0:
+                raise ValueError(
+                    f"No observations found for enrolled identity {person}."
+                )
+
+            # Select one random observation for the gallery.
+            pick_position = rng.integers(len(idx))
+
+            pick = idx[pick_position]
+
+            gallery_rows.append(E[pick])
+            gallery_labels.append(person)
+
+            # The remaining observations become probes.
+            other_idx = np.delete(idx, pick_position)
+
+            probe_rows.extend(E[other_idx])
+            probe_labels.extend([person] * len(other_idx))
+
+        # -----------------------------------------------------
+        # 4b. Add all impostor observations as unknown probes.
+        # -----------------------------------------------------
+
+        for person in impostor_people:
+
+            idx = np.flatnonzero(ids == person)
+
+            if len(idx) == 0:
+                raise ValueError(
+                    f"No observations found for impostor identity {person}."
+                )
+
+            probe_rows.extend(E[idx])
+
+            # -1 denotes an identity absent from the gallery.
+            probe_labels.extend([-1] * len(idx))
+
+        # -----------------------------------------------------
+        # 4c. Convert the collected observations into arrays.
+        # -----------------------------------------------------
+
+        if len(gallery_rows) == 0:
+            raise ValueError("The gallery must contain at least one person.")
+
+        if len(probe_rows) == 0:
+            raise ValueError("The scene must contain at least one probe.")
+
+        gallery = np.asarray(gallery_rows, dtype=float)
+
+        gallery_ids = np.asarray(gallery_labels, dtype=int)
+
+        probes = np.asarray(probe_rows, dtype=float)
+
+        true = np.asarray(probe_labels, dtype=int)
+
+        return gallery, gallery_ids, probes, true
+
+    # ---------------------------------------------------------
+    # 5. Construct the calibration scene.
+    # ---------------------------------------------------------
+
+    calib_people = np.asarray(split["calib"])
+
+    if calib_people.ndim != 1 or len(calib_people) < 2:
+        raise ValueError(
+            "At least two calibration identities are required."
+        )
+
+    # The first round(len(calib) * 5 / 8) people are enrolled.
+    # The remaining calibration identities act as impostors.
+
+    n_calib_enrolled = round(len(calib_people) * 5 / 8)
+
+    calib_enrolled = calib_people[:n_calib_enrolled]
+
+    calib_impostors = calib_people[n_calib_enrolled:]
+
+    if len(calib_enrolled) == 0 or len(calib_impostors) == 0:
+        raise ValueError(
+            "The calibration split must contain both enrolled "
+            "and impostor identities."
+        )
+
+    calib_gallery, calib_gallery_ids, calib_probes, calib_true = (
+        build_scene(
+            calib_enrolled,
+            calib_impostors
+        )
+    )
+
+    # ---------------------------------------------------------
+    # 6. Select the threshold using calibration data only.
+    # ---------------------------------------------------------
+
+    tau, _ = tune_threshold(
+        calib_gallery,
+        calib_gallery_ids,
+        calib_probes,
+        calib_true
+    )
+
+    # ---------------------------------------------------------
+    # 7. Construct the independent test scene.
+    # ---------------------------------------------------------
+
+    test_gallery, test_gallery_ids, test_probes, test_true = (
+        build_scene(
+            split["enrolled"],
+            split["impostors"]
+        )
+    )
+
+    # ---------------------------------------------------------
+    # 8. Obtain rank-1 predictions and similarity scores.
+    # ---------------------------------------------------------
+
+    # Use tau=-inf to accept every probe and obtain its best
+    # gallery identity and maximum cosine similarity.
+    #
+    # This computes similarities only once for the test scene.
+
+    rank1_pred, scores = open_set_predict(
+        test_gallery,
+        test_gallery_ids,
+        test_probes,
+        -np.inf
+    )
+
+    # Apply the previously calibrated rejection threshold.
+    pred = rank1_pred.copy()
+
+    pred[scores < tau] = -1
+
+    # ---------------------------------------------------------
+    # 9. Calculate the open-set recognition metrics.
+    # ---------------------------------------------------------
+
+    metrics = open_set_metrics(
+        pred,
+        test_true
+    )
+
+    # ---------------------------------------------------------
+    # 10. Calculate rank-1 identification accuracy.
+    # ---------------------------------------------------------
+
+    enrolled_mask = test_true != -1
+
+    # Rank-1 accuracy is measured without rejection.
+    # Only enrolled probes are considered.
+
+    rank1 = float(
+        np.mean(
+            rank1_pred[enrolled_mask]
+            == test_true[enrolled_mask]
+        )
+    )
+
+    # ---------------------------------------------------------
+    # 11. Calculate the ROC AUC.
+    # ---------------------------------------------------------
+
+    # The score measures the maximum similarity with the gallery.
+    #
+    # AUC is the probability that an enrolled probe has a
+    # higher score than an impostor probe.
+    #
+    # Ties count as one-half.
+
+    positive_scores = scores[test_true != -1]
+
+    negative_scores = scores[test_true == -1]
+
+    if len(positive_scores) == 0 or len(negative_scores) == 0:
+        raise ValueError(
+            "The test scene must contain both enrolled and impostor probes."
+        )
+
+    score_differences = (
+        positive_scores[:, None]
+        - negative_scores[None, :]
+    )
+
+    auc = float(
+        np.mean(
+            (score_differences > 0)
+            + 0.5 * (score_differences == 0)
+        )
+    )
+
+    # ---------------------------------------------------------
+    # 12. Calculate the oracle balanced score.
+    # ---------------------------------------------------------
+
+    # This uses the test data itself to find the best possible
+    # threshold. It is an optimistic reference, NOT the
+    # deployable calibrated performance.
+
+    _, oracle = tune_threshold(
+        test_gallery,
+        test_gallery_ids,
+        test_probes,
+        test_true
+    )
+
+    # ---------------------------------------------------------
+    # 13. Combine and return all results.
+    # ---------------------------------------------------------
+
+    result = {
+        "dir": float(metrics["dir"]),
+        "far": float(metrics["far"]),
+        "balanced": float(metrics["balanced"]),
+        "rank1": float(rank1),
+        "auc": float(auc),
+        "tau": float(tau),
+        "oracle": float(oracle)
+    }
+
+    return result
+
+
+def face_bakeoff(
+    methods,
+    X,
+    ids,
+    seeds,
+    n_train=17,
+    n_calib=8,
+    n_enrolled=10,
+    n_impostors=5
+):
+    """Run a paired comparison of embedding methods over multiple
+    person-independent train/calibration/enrollment/impostor splits.
+
+    Parameters
+    ----------
+    methods : dict
+        Mapping from method names to functions:
+
+            make(X_train, ids_train, seed) -> embed
+
+        Each returned embed function maps raw observations to
+        embedding vectors.
+
+    X : ndarray, shape (N, D)
+        Raw face observations.
+
+    ids : ndarray, shape (N,)
+        Person identity of every observation.
+
+    seeds : iterable
+        Random seeds defining the experimental splits.
+
+    n_train : int, default=17
+        Number of identities used to train the embedding.
+
+    n_calib : int, default=8
+        Number of calibration identities.
+
+    n_enrolled : int, default=10
+        Number of enrolled test identities.
+
+    n_impostors : int, default=5
+        Number of test impostor identities.
+
+    Returns
+    -------
+    results : dict
+        Mapping from method names to mean experimental metrics,
+        plus paired AUC gain and its standard error.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Validate inputs.
+    # ---------------------------------------------------------
+
+    X = np.asarray(X, dtype=float)
+    ids = np.asarray(ids)
+
+    if X.ndim != 2:
+        raise ValueError("X must be a 2D array.")
+
+    if ids.ndim != 1:
+        raise ValueError("ids must be a 1D array.")
+
+    if len(X) != len(ids):
+        raise ValueError("X and ids must have the same number of rows.")
+
+    if len(X) == 0:
+        raise ValueError("X must not be empty.")
+
+    if not np.all(np.isfinite(X)):
+        raise ValueError("X must contain finite values.")
+
+    if len(methods) == 0:
+        raise ValueError("methods must contain at least one method.")
+
+    for name, make in methods.items():
+        if not callable(make):
+            raise ValueError(
+                f"The method '{name}' must be callable."
+            )
+
+    # Convert seeds to a list so they can be reused consistently.
+    seeds = list(seeds)
+
+    if len(seeds) == 0:
+        raise ValueError("At least one seed is required.")
+
+    # ---------------------------------------------------------
+    # 2. Identify all distinct people.
+    # ---------------------------------------------------------
+
+    # split_identities() produces indices from 0 to n_people-1.
+    # These positions must be mapped back to the actual IDs,
+    # since real person IDs need not be contiguous.
+
+    people = np.unique(ids)
+
+    n_people = len(people)
+
+    total_requested = (
+        n_train
+        + n_calib
+        + n_enrolled
+        + n_impostors
+    )
+
+    if total_requested > n_people:
+        raise ValueError(
+            "Requested identity groups exceed the available people."
+        )
+
+    # ---------------------------------------------------------
+    # 3. Prepare per-method result storage.
+    # ---------------------------------------------------------
+
+    metric_keys = (
+        "dir",
+        "far",
+        "balanced",
+        "rank1",
+        "auc",
+        "tau",
+        "oracle"
+    )
+
+    per_method = {
+        name: {key: [] for key in metric_keys}
+        for name in methods
+    }
+
+    # The first method is the baseline.
+    baseline_name = next(iter(methods))
+
+    # Store AUC values per seed for paired comparisons.
+    auc_values = {
+        name: []
+        for name in methods
+    }
+
+    # ---------------------------------------------------------
+    # 4. Run the experiments over the supplied seeds.
+    # ---------------------------------------------------------
+
+    for seed in seeds:
+
+        # -----------------------------------------------------
+        # 4a. Generate ONE identity split for this seed.
+        # -----------------------------------------------------
+
+        split_indices = split_identities(
+            n_people,
+            n_train,
+            n_calib,
+            n_enrolled,
+            n_impostors,
+            seed=seed
+        )
+
+        # Map positional person indices to actual identity IDs.
+        split = {
+            key: people[value]
+            for key, value in split_indices.items()
+        }
+
+        # -----------------------------------------------------
+        # 4b. Select training observations.
+        # -----------------------------------------------------
+
+        train_mask = np.isin(
+            ids,
+            split["train"]
+        )
+
+        X_train = X[train_mask].copy()
+
+        ids_train = ids[train_mask].copy()
+
+        # -----------------------------------------------------
+        # 4c. Evaluate every method on the SAME split.
+        # -----------------------------------------------------
+
+        for name, make in methods.items():
+
+            # Fit the embedding using training people's rows only.
+            #
+            # No calibration, enrolled-test, or impostor-test
+            # identity is used to fit the embedding.
+
+            embed = make(
+                X_train.copy(),
+                ids_train.copy(),
+                seed
+            )
+
+            if not callable(embed):
+                raise ValueError(
+                    f"Method '{name}' must return an embedding callable."
+                )
+
+            # Run the same open-set protocol for this method.
+            trial = open_set_trial(
+                embed,
+                X,
+                ids,
+                split,
+                seed=seed
+            )
+
+            # Store all metrics for later averaging.
+            for key in metric_keys:
+                per_method[name][key].append(
+                    float(trial[key])
+                )
+
+            auc_values[name].append(
+                float(trial["auc"])
+            )
+
+    # ---------------------------------------------------------
+    # 5. Calculate the mean metrics for each method.
+    # ---------------------------------------------------------
+
+    results = {}
+
+    for name in methods:
+
+        results[name] = {
+            key: float(np.mean(values))
+            for key, values in per_method[name].items()
+        }
+
+    # ---------------------------------------------------------
+    # 6. Calculate paired AUC gains relative to the baseline.
+    # ---------------------------------------------------------
+
+    baseline_auc = np.asarray(
+        auc_values[baseline_name],
+        dtype=float
+    )
+
+    n_seeds = len(seeds)
+
+    for name in methods:
+
+        method_auc = np.asarray(
+            auc_values[name],
+            dtype=float
+        )
+
+        # Calculate the AUC difference for each identical seed.
+        differences = method_auc - baseline_auc
+
+        # Mean paired AUC improvement.
+        auc_gain = float(np.mean(differences))
+
+        # Standard error of paired differences.
+        if n_seeds > 1:
+            auc_gain_se = float(
+                np.std(differences, ddof=1)
+                / np.sqrt(n_seeds)
+            )
+        else:
+            auc_gain_se = 0.0
+
+        results[name]["auc_gain"] = auc_gain
+
+        results[name]["auc_gain_se"] = auc_gain_se
+
+    return results
+
