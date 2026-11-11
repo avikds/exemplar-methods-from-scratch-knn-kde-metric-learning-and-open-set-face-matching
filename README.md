@@ -26,6 +26,7 @@ python scaffold.py
 - [x] **14.** loess
 - [x] **15.** nca_objective
 - [x] **16.** lmnn_objective
+- [x] **17.** fit_linear_metric
 
 ---
 

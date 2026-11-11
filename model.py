@@ -2984,3 +2984,148 @@ def lmnn_objective(W, X, y, targets, m=1.0, lam=0.5):
 
     return float(loss), grad, int(n_active)
 
+# Step 17 - fit_linear_metric
+def fit_linear_metric(objective, W0, steps=200, lr=0.01):
+    """Minimise objective(W) -> (loss, grad) with Adam.
+
+    Parameters
+    ----------
+    objective : callable
+        Function accepting W and returning (loss, grad).
+        The gradient must have the same shape as W.
+
+    W0 : ndarray, shape (L, D)
+        Initial transformation matrix. It is not modified.
+
+    steps : int, default=200
+        Number of Adam optimization iterations.
+
+    lr : float, default=0.01
+        Learning rate.
+
+    Returns
+    -------
+    W : ndarray
+        Optimized transformation matrix.
+
+    history : list of float
+        Objective loss at the start of each iteration.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Validate the initial matrix and optimizer parameters.
+    # ---------------------------------------------------------
+
+    W0 = np.asarray(W0, dtype=float)
+
+    if W0.ndim != 2:
+        raise ValueError("W0 must be a 2D matrix.")
+
+    if W0.size == 0:
+        raise ValueError("W0 must not be empty.")
+
+    if not np.all(np.isfinite(W0)):
+        raise ValueError("W0 must contain finite values.")
+
+    if (
+        isinstance(steps, (bool, np.bool_))
+        or not isinstance(steps, (int, np.integer))
+        or steps < 0
+    ):
+        raise ValueError("steps must be a non-negative integer.")
+
+    try:
+        lr = float(lr)
+    except (TypeError, ValueError):
+        raise ValueError("lr must be a positive finite number.")
+
+    if not np.isfinite(lr) or lr <= 0:
+        raise ValueError("lr must be a positive finite number.")
+
+    # Make a copy so that the original W0 remains unchanged.
+    W = W0.copy()
+
+    # ---------------------------------------------------------
+    # 2. Initialize Adam hyperparameters.
+    # ---------------------------------------------------------
+
+    beta1 = 0.9
+    beta2 = 0.999
+    epsilon = 1e-8
+
+    # First and second moment estimates.
+    m = np.zeros_like(W)
+    v = np.zeros_like(W)
+
+    # Store the loss at the start of each iteration.
+    history = []
+
+    # ---------------------------------------------------------
+    # 3. Perform Adam optimization.
+    # ---------------------------------------------------------
+
+    for t in range(1, steps + 1):
+
+        # Evaluate the objective exactly once per iteration.
+        # This is important because the objective may generate
+        # a fresh minibatch on every call.
+        loss, grad = objective(W)
+
+        loss = float(loss)
+        grad = np.asarray(grad, dtype=float)
+
+        # Validate the returned objective and gradient.
+        if not np.isfinite(loss):
+            raise FloatingPointError(
+                "The objective returned a non-finite loss."
+            )
+
+        if grad.shape != W.shape:
+            raise ValueError(
+                "The gradient must have the same shape as W."
+            )
+
+        if not np.all(np.isfinite(grad)):
+            raise FloatingPointError(
+                "The objective returned a non-finite gradient."
+            )
+
+        # Record the loss BEFORE applying this iteration's update.
+        history.append(loss)
+
+        # -----------------------------------------------------
+        # 4. Update the first moment estimate.
+        # -----------------------------------------------------
+
+        # m_t = beta1 * m_(t-1) + (1 - beta1) * g_t
+
+        m = beta1 * m + (1.0 - beta1) * grad
+
+        # -----------------------------------------------------
+        # 5. Update the second moment estimate.
+        # -----------------------------------------------------
+
+        # v_t = beta2 * v_(t-1) + (1 - beta2) * g_t^2
+
+        v = beta2 * v + (1.0 - beta2) * grad**2
+
+        # -----------------------------------------------------
+        # 6. Apply bias correction.
+        # -----------------------------------------------------
+
+        # Corrected first moment.
+        m_hat = m / (1.0 - beta1**t)
+
+        # Corrected second moment.
+        v_hat = v / (1.0 - beta2**t)
+
+        # -----------------------------------------------------
+        # 7. Update the parameter matrix.
+        # -----------------------------------------------------
+
+        # W = W - lr * m_hat / sqrt(v_hat + epsilon)
+
+        W = W - lr * m_hat / np.sqrt(v_hat + epsilon)
+
+    return W, history
+
