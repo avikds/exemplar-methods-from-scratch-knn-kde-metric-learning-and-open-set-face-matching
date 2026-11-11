@@ -2594,3 +2594,393 @@ def nca_objective(W, X, y):
 
     return J, grad
 
+# Step 16 - lmnn_objective
+def target_neighbors(X, y, K):
+    """Return the (N, K) array of same-class nearest neighbours.
+
+    Neighbours are selected using Euclidean distance, excluding
+    the observation itself. Ties are resolved by smaller index.
+
+    Parameters
+    ----------
+    X : ndarray, shape (N, D)
+        Training observations.
+
+    y : ndarray, shape (N,)
+        Class labels.
+
+    K : int
+        Number of same-class target neighbours.
+
+    Returns
+    -------
+    targets : ndarray, shape (N, K)
+        Indices of the K nearest same-class neighbours for each
+        training observation.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Convert and validate inputs.
+    # ---------------------------------------------------------
+
+    X = np.asarray(X, dtype=float)
+    y = np.asarray(y)
+
+    if X.ndim != 2:
+        raise ValueError("X must be a 2D array.")
+
+    if y.ndim != 1:
+        raise ValueError("y must be a 1D array.")
+
+    N, D = X.shape
+
+    if N == 0 or D == 0:
+        raise ValueError("X must contain observations and features.")
+
+    if len(y) != N:
+        raise ValueError("X and y must have the same number of observations.")
+
+    if not np.all(np.isfinite(X)):
+        raise ValueError("X must contain finite values.")
+
+    if (
+        isinstance(K, (bool, np.bool_))
+        or not isinstance(K, (int, np.integer))
+        or K < 1
+    ):
+        raise ValueError("K must be a positive integer.")
+
+    # ---------------------------------------------------------
+    # 2. Calculate pairwise squared Euclidean distances.
+    # ---------------------------------------------------------
+
+    # Reuse pairwise_sq_dists() from Step 1.
+    distances = pairwise_sq_dists(X)
+
+    # ---------------------------------------------------------
+    # 3. Identify same-class neighbours.
+    # ---------------------------------------------------------
+
+    # same_class[i, j] is True when observations i and j
+    # belong to the same class.
+
+    same_class = y[:, None] == y[None, :]
+
+    # An observation cannot be its own neighbour.
+    np.fill_diagonal(same_class, False)
+
+    # Each observation must have at least K other observations
+    # belonging to its class.
+    if np.any(np.sum(same_class, axis=1) < K):
+        raise ValueError(
+            "Every observation must have at least K other observations "
+            "belonging to the same class."
+        )
+
+    # Replace distances to different-class observations
+    # with infinity so that they cannot be selected.
+
+    masked_distances = np.where(
+        same_class,
+        distances,
+        np.inf
+    )
+
+    # ---------------------------------------------------------
+    # 4. Select the K nearest same-class observations.
+    # ---------------------------------------------------------
+
+    # Stable sorting ensures that smaller training indices
+    # win whenever distances are equal.
+
+    sorted_indices = np.argsort(
+        masked_distances,
+        axis=1,
+        kind="stable"
+    )
+
+    targets = sorted_indices[:, :K]
+
+    return targets
+
+
+def lmnn_objective(W, X, y, targets, m=1.0, lam=0.5):
+    """Return (loss, grad, n_active) for LMNN (eq 16.4, 16.5).
+
+    The LMNN objective combines:
+      - Pull loss: brings target neighbours closer.
+      - Push loss: separates impostors using a margin constraint.
+
+    Parameters
+    ----------
+    W : ndarray, shape (L, D)
+        Linear transformation matrix.
+
+    X : ndarray, shape (N, D)
+        Training observations.
+
+    y : ndarray, shape (N,)
+        Training class labels.
+
+    targets : ndarray, shape (N, K)
+        Fixed target-neighbour indices, computed on the original
+        feature space using target_neighbors().
+
+    m : float, default=1.0
+        Margin used in the impostor constraints.
+
+    lam : float, default=0.5
+        Weight assigned to the push loss. Must lie in [0, 1].
+
+    Returns
+    -------
+    loss : float
+        Total LMNN objective.
+
+    grad : ndarray, shape (L, D)
+        Exact gradient of the objective with the active hinge
+        terms held fixed.
+
+    n_active : int
+        Number of triplets having strictly positive hinge loss.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Convert inputs and validate dimensions.
+    # ---------------------------------------------------------
+
+    W = np.asarray(W, dtype=float)
+    X = np.asarray(X, dtype=float)
+    y = np.asarray(y)
+
+    targets = np.asarray(targets)
+
+    if W.ndim != 2:
+        raise ValueError("W must be a 2D array.")
+
+    if X.ndim != 2:
+        raise ValueError("X must be a 2D array.")
+
+    if y.ndim != 1:
+        raise ValueError("y must be a 1D array.")
+
+    N, D = X.shape
+    L = W.shape[0]
+
+    if N == 0 or D == 0 or L == 0:
+        raise ValueError("W and X must have non-empty dimensions.")
+
+    if W.shape[1] != D:
+        raise ValueError("W must have shape (L, D).")
+
+    if len(y) != N:
+        raise ValueError("X and y must have the same number of observations.")
+
+    if not np.all(np.isfinite(W)) or not np.all(np.isfinite(X)):
+        raise ValueError("W and X must contain finite values.")
+
+    # ---------------------------------------------------------
+    # 2. Validate target-neighbour indices.
+    # ---------------------------------------------------------
+
+    if targets.ndim != 2 or targets.shape[0] != N:
+        raise ValueError("targets must have shape (N, K).")
+
+    if targets.shape[1] < 1:
+        raise ValueError("targets must contain at least one neighbour per row.")
+
+    if not np.issubdtype(targets.dtype, np.integer):
+        raise ValueError("targets must contain integer indices.")
+
+    K = targets.shape[1]
+
+    if np.any(targets < 0) or np.any(targets >= N):
+        raise ValueError("Every target index must be between 0 and N-1.")
+
+    # Target neighbours must not include the observation itself.
+    if np.any(targets == np.arange(N)[:, None]):
+        raise ValueError("An observation cannot be its own target neighbour.")
+
+    # Target neighbours must belong to the same class.
+    if np.any(y[targets] != y[:, None]):
+        raise ValueError("Every target neighbour must have the same class.")
+
+    # Prevent duplicate target neighbours within a row.
+    if np.any(np.diff(np.sort(targets, axis=1), axis=1) == 0):
+        raise ValueError("Target neighbours must be unique within each row.")
+
+    # ---------------------------------------------------------
+    # 3. Validate margin and regularization weight.
+    # ---------------------------------------------------------
+
+    try:
+        m = float(m)
+        lam = float(lam)
+    except (TypeError, ValueError):
+        raise ValueError("m and lam must be finite scalar values.")
+
+    if not np.isfinite(m) or m < 0:
+        raise ValueError("m must be a finite non-negative number.")
+
+    if not np.isfinite(lam) or not (0.0 <= lam <= 1.0):
+        raise ValueError("lam must lie between 0 and 1.")
+
+    # ---------------------------------------------------------
+    # 4. Transform the training observations.
+    # ---------------------------------------------------------
+
+    # z_i = W @ x_i
+    #
+    # Since observations are stored row-wise:
+    #
+    # Z = X @ W.T
+
+    Z = X @ W.T
+
+    # ---------------------------------------------------------
+    # 5. Compute all transformed pairwise squared distances.
+    # ---------------------------------------------------------
+
+    # d_ij^2 = ||W x_i - W x_j||^2
+
+    distances = pairwise_sq_dists(Z)
+
+    # Row indices for vectorized access to target distances.
+    rows = np.arange(N)
+
+    # ---------------------------------------------------------
+    # 6. Initialize the pull loss and push loss.
+    # ---------------------------------------------------------
+
+    # Pull loss:
+    #
+    # L_pull = sum_i sum_{j in N_i} d_ij^2
+
+    target_distances = distances[rows[:, None], targets]
+
+    L_pull = float(np.sum(target_distances))
+
+    # Push loss:
+    #
+    # L_push = sum_i sum_{j in N_i} sum_{l:y_l != y_i}
+    #          [m + d_ij^2 - d_il^2]_+
+
+    L_push = 0.0
+
+    # Count triplets with strictly positive hinge loss.
+    n_active = 0
+
+    # ---------------------------------------------------------
+    # 7. Construct the fixed pairwise weight matrix A.
+    # ---------------------------------------------------------
+
+    # The entire loss gradient can be represented through:
+    #
+    # grad = pair_gradient(W, X, A)
+    #
+    # A has shape (N, N).
+
+    A = np.zeros((N, N), dtype=float)
+
+    # Difference labels identify impostor observations.
+    impostors = y[:, None] != y[None, :]
+
+    # ---------------------------------------------------------
+    # 8. Process each target-neighbour column.
+    # ---------------------------------------------------------
+
+    # This is the only loop over target neighbours.
+    # There are no loops over individual training observations.
+
+    for k in range(K):
+
+        # Target neighbour of each anchor observation.
+        j = targets[:, k]
+
+        # Squared distance between every anchor and its
+        # corresponding target neighbour.
+        d_target = distances[rows, j]
+
+        # -----------------------------------------------------
+        # 8a. Calculate the impostor hinge terms.
+        # -----------------------------------------------------
+
+        # hinge[i, l] = m + d_ij^2 - d_il^2
+
+        hinge = (
+            m
+            + d_target[:, None]
+            - distances
+        )
+
+        # A triplet is active only when:
+        # 1. l belongs to a different class.
+        # 2. Its hinge value is strictly positive.
+
+        active = (hinge > 0.0) & impostors
+
+        # -----------------------------------------------------
+        # 8b. Accumulate the push loss.
+        # -----------------------------------------------------
+
+        positive_hinge = np.where(
+            active,
+            hinge,
+            0.0
+        )
+
+        L_push += float(np.sum(positive_hinge))
+
+        # Count active triplets.
+        n_active += int(np.count_nonzero(active))
+
+        # -----------------------------------------------------
+        # 8c. Accumulate the pull and push gradient weights.
+        # -----------------------------------------------------
+
+        # Pull contribution:
+        # (1 - lam) * d_ij^2
+
+        # Push contribution for the target pair:
+        # +lam * d_ij^2 for each active impostor triplet.
+
+        active_per_anchor = np.sum(
+            active,
+            axis=1
+        )
+
+        A[rows, j] += (
+            (1.0 - lam)
+            + lam * active_per_anchor
+        )
+
+        # Push contribution for each impostor pair:
+        # -lam * d_il^2 for every active triplet.
+
+        A -= lam * active
+
+    # ---------------------------------------------------------
+    # 9. Compute the total LMNN objective.
+    # ---------------------------------------------------------
+
+    # loss = (1 - lam) * L_pull + lam * L_push
+
+    loss = (
+        (1.0 - lam) * L_pull
+        + lam * L_push
+    )
+
+    # ---------------------------------------------------------
+    # 10. Compute the exact analytical gradient.
+    # ---------------------------------------------------------
+
+    # Reuse the shared pairwise gradient helper from Step 15.
+
+    grad = pair_gradient(
+        W,
+        X,
+        A
+    )
+
+    return float(loss), grad, int(n_active)
+

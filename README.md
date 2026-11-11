@@ -25,6 +25,7 @@ python scaffold.py
 - [x] **13.** loo_nw_bandwidth
 - [x] **14.** loess
 - [x] **15.** nca_objective
+- [x] **16.** lmnn_objective
 
 ---
 
