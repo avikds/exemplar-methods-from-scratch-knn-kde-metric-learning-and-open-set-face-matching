@@ -5276,3 +5276,162 @@ def open_set_metrics(pred, true):
         "balanced": float(balanced)
     }
 
+# Step 26 - tune_threshold
+def tune_threshold(gallery, gallery_ids, probes, true):
+    """Return (tau, best): the threshold maximizing the balanced
+    open-set recognition score on a calibration set.
+
+    Parameters
+    ----------
+    gallery : ndarray, shape (N_gallery, L)
+        Embeddings of enrolled identities.
+
+    gallery_ids : ndarray, shape (N_gallery,)
+        Identity IDs corresponding to gallery embeddings.
+
+    probes : ndarray, shape (N_probes, L)
+        Calibration probe embeddings.
+
+    true : ndarray, shape (N_probes,)
+        Actual identity IDs. A value of -1 indicates a
+        non-enrolled person.
+
+    Returns
+    -------
+    tau : float
+        Selected rejection threshold. If multiple candidates
+        achieve the best score within 1e-12, their median
+        threshold is returned.
+
+    best : float
+        Highest balanced score achieved on the calibration set.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Convert and validate the true identity labels.
+    # ---------------------------------------------------------
+
+    true = np.asarray(true)
+
+    if true.ndim != 1:
+        raise ValueError("true must be a 1D array.")
+
+    if not np.issubdtype(true.dtype, np.integer):
+        raise ValueError("true must contain integer identity IDs.")
+
+    if true.size == 0:
+        raise ValueError("The calibration set must not be empty.")
+
+    # Both enrolled and non-enrolled probes are required.
+    if not np.any(true != -1):
+        raise ValueError("At least one enrolled probe is required.")
+
+    if not np.any(true == -1):
+        raise ValueError("At least one non-enrolled probe is required.")
+
+    # ---------------------------------------------------------
+    # 2. Compute the best gallery match and cosine score ONCE.
+    # ---------------------------------------------------------
+
+    # tau = -inf ensures that every probe is accepted.
+    #
+    # We retain these predictions as the best gallery identity
+    # for each probe. Candidate thresholds will only change
+    # whether a probe is accepted or rejected.
+    #
+    # Similarities must NOT be recomputed for each candidate.
+
+    best_ids, scores = open_set_predict(
+        gallery,
+        gallery_ids,
+        probes,
+        -np.inf
+    )
+
+    # ---------------------------------------------------------
+    # 3. Find the distinct cosine similarity scores.
+    # ---------------------------------------------------------
+
+    distinct_scores = np.unique(scores)
+
+    if distinct_scores.size == 0:
+        raise ValueError("No calibration similarity scores are available.")
+
+    # ---------------------------------------------------------
+    # 4. Construct all candidate thresholds.
+    # ---------------------------------------------------------
+
+    # Candidate 1:
+    # 1e-6 below the smallest distinct similarity score.
+
+    lower_threshold = distinct_scores[0] - 1e-6
+
+    # Candidate thresholds:
+    # Midpoints between consecutive distinct scores.
+
+    midpoints = (
+        distinct_scores[:-1] + distinct_scores[1:]
+    ) / 2.0
+
+    # Final candidate:
+    # 1e-6 above the largest distinct similarity score.
+
+    upper_threshold = distinct_scores[-1] + 1e-6
+
+    # Combine all candidates in ascending order.
+    candidates = np.concatenate((
+        np.array([lower_threshold]),
+        midpoints,
+        np.array([upper_threshold])
+    ))
+
+    # ---------------------------------------------------------
+    # 5. Evaluate the balanced score for every candidate.
+    # ---------------------------------------------------------
+
+    balanced_scores = np.empty(
+        len(candidates),
+        dtype=float
+    )
+
+    for i, threshold in enumerate(candidates):
+
+        # Reuse the previously computed best gallery IDs.
+        # No additional cosine similarity computation is needed.
+
+        pred = np.where(
+            scores >= threshold,
+            best_ids,
+            -1
+        )
+
+        # Evaluate the open-set metrics.
+        metrics = open_set_metrics(
+            pred,
+            true
+        )
+
+        balanced_scores[i] = metrics["balanced"]
+
+    # ---------------------------------------------------------
+    # 6. Find the highest balanced score.
+    # ---------------------------------------------------------
+
+    best = float(np.max(balanced_scores))
+
+    # ---------------------------------------------------------
+    # 7. Handle multiple thresholds achieving the best score.
+    # ---------------------------------------------------------
+
+    # Include all candidate thresholds whose balanced scores
+    # are within 1e-12 of the maximum.
+
+    tied = np.abs(
+        balanced_scores - best
+    ) <= 1e-12
+
+    # Select the median threshold among tied candidates.
+    tau = float(np.median(candidates[tied]))
+
+    return tau, best
+
