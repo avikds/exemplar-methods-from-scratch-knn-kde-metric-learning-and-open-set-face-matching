@@ -965,3 +965,88 @@ def kde_density(x_train, x_query, h, kernel="gaussian"):
 
     return density
 
+# Step 8 - silverman_bandwidth
+def silverman_bandwidth(X):
+    """Return Silverman's bandwidth with the MAD-based robust scale,
+    combined over dimensions using a geometric mean.
+
+    Parameters
+    ----------
+    X : array-like, shape (N,) or (N, D)
+        Training observations. Can be one-dimensional or
+        multidimensional.
+
+    Returns
+    -------
+    float
+        A single bandwidth obtained by taking the geometric
+        mean of the individual dimension-wise bandwidths.
+    """
+
+    # Convert the input to a floating-point NumPy array.
+    X = np.asarray(X, dtype=float)
+
+    # Accept either a 1-D array or a 2-D array.
+    if X.ndim == 1:
+        X = X.reshape(-1, 1)
+
+    elif X.ndim != 2:
+        raise ValueError("X must be either a 1-D or 2-D array.")
+
+    # Validate the input data.
+    if X.shape[0] == 0 or X.shape[1] == 0:
+        raise ValueError("X must contain at least one sample and one dimension.")
+
+    if not np.all(np.isfinite(X)):
+        raise ValueError("X must contain only finite values.")
+
+    # Number of observations and dimensions.
+    N, D = X.shape
+
+    # ---------------------------------------------------------
+    # 1. Compute the median of each dimension.
+    # ---------------------------------------------------------
+
+    median = np.median(X, axis=0)
+
+    # ---------------------------------------------------------
+    # 2. Compute the Median Absolute Deviation (MAD).
+    # ---------------------------------------------------------
+
+    # MAD_d = median(|x_d - median(x_d)|)
+    mad = np.median(
+        np.abs(X - median),
+        axis=0
+    )
+
+    # ---------------------------------------------------------
+    # 3. Convert MAD into a robust estimate of standard deviation.
+    # ---------------------------------------------------------
+
+    # sigma_hat_d = 1.4826 * MAD_d
+    sigma_hat = 1.4826 * mad
+
+    # A zero MAD means the robust scale is zero in that dimension.
+    if np.any(mad == 0):
+        raise ValueError(
+            "Median absolute deviation must be non-zero in every dimension."
+        )
+
+    # ---------------------------------------------------------
+    # 4. Compute the Silverman bandwidth for each dimension.
+    # ---------------------------------------------------------
+
+    # h_d = sigma_hat_d * (4 / (3*N))^(1/5)
+    h_d = sigma_hat * (4.0 / (3.0 * N)) ** (1.0 / 5.0)
+
+    # ---------------------------------------------------------
+    # 5. Combine dimension-wise bandwidths using a geometric mean.
+    # ---------------------------------------------------------
+
+    # h = (product(h_d))^(1/D)
+    #
+    # Compute using logarithms for improved numerical stability.
+    bandwidth = np.exp(np.mean(np.log(h_d)))
+
+    return float(bandwidth)
+

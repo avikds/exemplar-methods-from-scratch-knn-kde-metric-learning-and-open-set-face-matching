@@ -17,6 +17,7 @@ python scaffold.py
 - [x] **5.** cube_edge_length
 - [x] **6.** noise_dimension_curve
 - [x] **7.** kde_density
+- [x] **8.** silverman_bandwidth
 
 ---
 
