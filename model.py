@@ -3684,3 +3684,191 @@ def contrastive_loss(E, y, m=1.0):
 
     return loss, G
 
+# Step 20 - mine_triplets
+def mine_triplets(E, y, m=0.2, mode="semi-hard"):
+    """Return a (T, 3) integer array of (anchor, positive, negative)
+    triplets selected according to the specified mining strategy.
+
+    Parameters
+    ----------
+    E : ndarray, shape (N, L)
+        Embedding vectors, with observations stored in rows.
+
+    y : ndarray, shape (N,)
+        Class labels.
+
+    m : float, default=0.2
+        Margin used for semi-hard and easy negative mining.
+
+    mode : str, default="semi-hard"
+        Negative mining strategy:
+            'all'       : Every different-class negative.
+            'hard'      : d(a,n) < d(a,p).
+            'semi-hard' : d(a,p) < d(a,n) < d(a,p) + m.
+            'easy'      : d(a,n) > d(a,p) + m.
+
+    Returns
+    -------
+    triplets : ndarray, shape (T, 3)
+        Integer array containing (anchor, positive, negative)
+        indices, sorted by anchor, positive, and negative indices.
+        Returns an empty array of shape (0, 3) if no triplets exist.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Convert and validate the inputs.
+    # ---------------------------------------------------------
+
+    E = np.asarray(E, dtype=float)
+    y = np.asarray(y)
+
+    if E.ndim != 2:
+        raise ValueError("E must be a 2D array.")
+
+    if y.ndim != 1:
+        raise ValueError("y must be a 1D array.")
+
+    N, L = E.shape
+
+    if L == 0:
+        raise ValueError("E must contain at least one embedding dimension.")
+
+    if len(y) != N:
+        raise ValueError("E and y must have the same number of observations.")
+
+    if not np.all(np.isfinite(E)):
+        raise ValueError("E must contain finite values.")
+
+    # ---------------------------------------------------------
+    # 2. Validate the mining mode.
+    # ---------------------------------------------------------
+
+    valid_modes = ("all", "hard", "semi-hard", "easy")
+
+    if mode not in valid_modes:
+        raise ValueError(
+            "Invalid mode. Choose from 'all', 'hard', "
+            "'semi-hard', or 'easy'."
+        )
+
+    # ---------------------------------------------------------
+    # 3. Validate the margin.
+    # ---------------------------------------------------------
+
+    try:
+        m = float(m)
+    except (TypeError, ValueError):
+        raise ValueError("m must be a finite non-negative number.")
+
+    if not np.isfinite(m) or m < 0:
+        raise ValueError("m must be a finite non-negative number.")
+
+    # ---------------------------------------------------------
+    # 4. Compute pairwise Euclidean distances.
+    # ---------------------------------------------------------
+
+    # Reuse pairwise_sq_dists() from Step 1.
+    #
+    # The function returns squared distances, so take
+    # the square root to obtain ordinary Euclidean distances.
+    #
+    # Shape: (N, N)
+
+    sq_dists = pairwise_sq_dists(E)
+
+    distances = np.sqrt(sq_dists)
+
+    # ---------------------------------------------------------
+    # 5. Identify all ordered anchor-positive pairs.
+    # ---------------------------------------------------------
+
+    # An anchor and positive must:
+    #   1. Have the same class label.
+    #   2. Be different observations.
+    #
+    # np.argwhere returns pairs in row-major order, meaning
+    # anchors are sorted first, followed by positive indices.
+
+    same_class = y[:, None] == y[None, :]
+
+    # Exclude self-pairs.
+    np.fill_diagonal(same_class, False)
+
+    positive_pairs = np.argwhere(same_class)
+
+    # ---------------------------------------------------------
+    # 6. Identify negatives for each anchor-positive pair.
+    # ---------------------------------------------------------
+
+    triplets = []
+
+    # Process anchor-positive pairs in their sorted order.
+    for a, p in positive_pairs:
+
+        # Positive distance between the anchor and positive.
+        d_ap = distances[a, p]
+
+        # Negative observations must have a different class
+        # from the anchor.
+        negative_mask = y != y[a]
+
+        # Obtain negative indices in ascending order.
+        negative_indices = np.flatnonzero(negative_mask)
+
+        # -----------------------------------------------------
+        # 7. Apply the requested mining strategy.
+        # -----------------------------------------------------
+
+        if mode == "all":
+
+            selected_negatives = negative_indices
+
+        else:
+
+            # Euclidean distances from the anchor to all
+            # candidate negatives.
+            d_an = distances[a, negative_indices]
+
+            if mode == "hard":
+
+                # Hard negatives:
+                # d(a,n) < d(a,p)
+
+                keep = d_an < d_ap
+
+            elif mode == "semi-hard":
+
+                # Semi-hard negatives:
+                # d(a,p) < d(a,n) < d(a,p) + m
+
+                keep = (
+                    (d_an > d_ap)
+                    & (d_an < d_ap + m)
+                )
+
+            else:  # mode == "easy"
+
+                # Easy negatives:
+                # d(a,n) > d(a,p) + m
+
+                keep = d_an > d_ap + m
+
+            selected_negatives = negative_indices[keep]
+
+        # -----------------------------------------------------
+        # 8. Append the selected triplets.
+        # -----------------------------------------------------
+
+        for n in selected_negatives:
+            triplets.append((a, p, n))
+
+    # ---------------------------------------------------------
+    # 9. Return a correctly shaped integer array.
+    # ---------------------------------------------------------
+
+    # Explicitly reshape so that an empty result has shape (0, 3).
+    return np.asarray(
+        triplets,
+        dtype=int
+    ).reshape(-1, 3)
+

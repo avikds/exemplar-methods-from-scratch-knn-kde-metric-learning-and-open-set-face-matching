@@ -29,6 +29,7 @@ python scaffold.py
 - [x] **17.** fit_linear_metric
 - [x] **18.** whitened_pca
 - [x] **19.** contrastive_loss
+- [x] **20.** mine_triplets
 
 ---
 
