@@ -6045,3 +6045,173 @@ def face_bakeoff(
 
     return results
 
+# Step 28 - online_gallery
+def online_gallery(stream, tau):
+    """Return the identity assigned to each row of the stream using
+    incremental cosine-similarity matching with novelty detection.
+
+    Parameters
+    ----------
+    stream : ndarray, shape (N, L)
+        Incoming embedding vectors, processed sequentially.
+
+    tau : float
+        Minimum cosine similarity required to match an existing
+        gallery entry. Positive and negative infinity are allowed.
+
+    Returns
+    -------
+    assigned_ids : ndarray, shape (N,)
+        Integer identity assigned to each incoming observation.
+
+        The first novel identity receives ID 0, the next novel
+        identity receives ID 1, and so on.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Convert and validate the input stream.
+    # ---------------------------------------------------------
+
+    stream = np.asarray(stream, dtype=float)
+
+    if stream.ndim != 2:
+        raise ValueError("stream must be a 2D array.")
+
+    N, L = stream.shape
+
+    if L == 0:
+        raise ValueError("stream must contain at least one feature.")
+
+    if not np.all(np.isfinite(stream)):
+        raise ValueError("stream must contain finite values.")
+
+    # ---------------------------------------------------------
+    # 2. Validate the cosine similarity threshold.
+    # ---------------------------------------------------------
+
+    try:
+        tau = float(tau)
+    except (TypeError, ValueError):
+        raise ValueError("tau must be a numeric scalar.")
+
+    if np.isnan(tau):
+        raise ValueError("tau must not be NaN.")
+
+    # ---------------------------------------------------------
+    # 3. Normalize all incoming embeddings.
+    # ---------------------------------------------------------
+
+    # Reuse unit_rows() from Step 19.
+    #
+    # Zero-length rows are handled safely by unit_rows(),
+    # which floors the normalization divisor at 1e-12.
+
+    stream_hat, _ = unit_rows(stream)
+
+    # ---------------------------------------------------------
+    # 4. Initialize the initially empty gallery.
+    # ---------------------------------------------------------
+
+    gallery = np.empty((0, L), dtype=float)
+
+    # Store the identity associated with every gallery row.
+    gallery_ids = []
+
+    # The next ID assigned to a newly discovered identity.
+    next_id = 0
+
+    # Store the identity assigned to every incoming observation.
+    assigned_ids = np.empty(N, dtype=int)
+
+    # ---------------------------------------------------------
+    # 5. Process incoming observations sequentially.
+    # ---------------------------------------------------------
+
+    for i in range(N):
+
+        # Current normalized embedding.
+        query = stream_hat[i]
+
+        # -----------------------------------------------------
+        # 5a. Handle the initially empty gallery.
+        # -----------------------------------------------------
+
+        if len(gallery) == 0:
+
+            # The first observation always establishes identity 0.
+            assigned_id = next_id
+
+            next_id += 1
+
+        else:
+
+            # -------------------------------------------------
+            # 5b. Calculate cosine similarities with the gallery.
+            # -------------------------------------------------
+
+            # Both gallery and query embeddings are normalized.
+            # Their dot products are cosine similarities.
+
+            similarities = gallery @ query
+
+            # Protect against floating-point rounding.
+            similarities = np.clip(
+                similarities,
+                -1.0,
+                1.0
+            )
+
+            # -------------------------------------------------
+            # 5c. Find the most similar existing gallery row.
+            # -------------------------------------------------
+
+            # np.argmax returns the first occurrence of the
+            # maximum, so the earliest gallery row wins ties.
+
+            best_index = int(np.argmax(similarities))
+
+            best_similarity = similarities[best_index]
+
+            # -------------------------------------------------
+            # 5d. Match an existing identity or discover a novel one.
+            # -------------------------------------------------
+
+            if best_similarity >= tau:
+
+                # Assign the identity associated with the
+                # most similar gallery observation.
+
+                assigned_id = gallery_ids[best_index]
+
+            else:
+
+                # No existing identity satisfies the threshold.
+                # Introduce a new identity.
+
+                assigned_id = next_id
+
+                next_id += 1
+
+        # -----------------------------------------------------
+        # 5e. Record the assigned identity.
+        # -----------------------------------------------------
+
+        assigned_ids[i] = assigned_id
+
+        # -----------------------------------------------------
+        # 5f. Add EVERY incoming observation to the gallery.
+        # -----------------------------------------------------
+
+        # This is important: even when an observation matches
+        # an existing identity, its embedding is added to the
+        # gallery for future comparisons.
+
+        gallery = np.vstack((
+            gallery,
+            query[None, :]
+        ))
+
+        gallery_ids.append(assigned_id)
+
+    return assigned_ids
+
