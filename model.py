@@ -6215,3 +6215,271 @@ def online_gallery(stream, tau):
 
     return assigned_ids
 
+# Step 29 - KDTree
+class KDTree:
+    """Exact nearest-neighbour search using recursive median splits
+    along the axis with the widest range.
+
+    Parameters
+    ----------
+    X : ndarray, shape (N, D)
+        Training observations.
+
+    leaf_size : int, default=8
+        Maximum number of points stored in a leaf.
+    """
+
+    def __init__(self, X, leaf_size=8):
+
+        # -----------------------------------------------------
+        # 1. Validate and store the training data.
+        # -----------------------------------------------------
+
+        X = np.asarray(X, dtype=float)
+
+        if X.ndim != 2:
+            raise ValueError("X must be a 2D array.")
+
+        if X.shape[0] == 0 or X.shape[1] == 0:
+            raise ValueError("X must contain observations and features.")
+
+        if not np.all(np.isfinite(X)):
+            raise ValueError("X must contain finite values.")
+
+        if (
+            isinstance(leaf_size, (bool, np.bool_))
+            or not isinstance(leaf_size, (int, np.integer))
+            or leaf_size < 1
+        ):
+            raise ValueError("leaf_size must be a positive integer.")
+
+        # Make a copy so external modifications cannot change the tree.
+        self.X = X.copy()
+
+        self.n_samples, self.n_features = self.X.shape
+        self.leaf_size = int(leaf_size)
+
+        # -----------------------------------------------------
+        # 2. Build the tree recursively using training indices.
+        # -----------------------------------------------------
+
+        self.root = self._build(
+            np.arange(self.n_samples, dtype=int)
+        )
+
+    def _build(self, indices):
+        """Recursively construct a k-d tree over row indices."""
+
+        # -----------------------------------------------------
+        # 1. Stop when the number of points fits in a leaf.
+        # -----------------------------------------------------
+
+        if len(indices) <= self.leaf_size:
+            return {
+                "indices": indices,
+                "axis": None,
+                "split": None,
+                "left": None,
+                "right": None
+            }
+
+        # -----------------------------------------------------
+        # 2. Find the axis with the widest range.
+        # -----------------------------------------------------
+
+        # np.argmax selects the smaller axis index in a tie.
+        ranges = np.ptp(
+            self.X[indices],
+            axis=0
+        )
+
+        axis = int(np.argmax(ranges))
+
+        # -----------------------------------------------------
+        # 3. Stable-sort points along the selected axis.
+        # -----------------------------------------------------
+
+        order = np.argsort(
+            self.X[indices, axis],
+            kind="stable"
+        )
+
+        sorted_indices = indices[order]
+
+        # -----------------------------------------------------
+        # 4. Divide the points into left and right subsets.
+        # -----------------------------------------------------
+
+        mid = len(sorted_indices) // 2
+
+        left_indices = sorted_indices[:mid]
+        right_indices = sorted_indices[mid:]
+
+        # The split value is the coordinate of the first point
+        # belonging to the right subtree.
+        split = float(
+            self.X[right_indices[0], axis]
+        )
+
+        # -----------------------------------------------------
+        # 5. Recursively build both subtrees.
+        # -----------------------------------------------------
+
+        left = self._build(left_indices)
+        right = self._build(right_indices)
+
+        return {
+            "indices": None,
+            "axis": axis,
+            "split": split,
+            "left": left,
+            "right": right
+        }
+
+    def query(self, x):
+        """Return (index, distance, n_visited).
+
+        Parameters
+        ----------
+        x : ndarray, shape (D,)
+            Query observation.
+
+        Returns
+        -------
+        index : int
+            Row index of the exact nearest neighbour.
+            Smaller index wins an exact distance tie.
+
+        distance : float
+            Euclidean distance to the nearest neighbour.
+
+        n_visited : int
+            Number of training points whose distances were computed.
+        """
+
+        # -----------------------------------------------------
+        # 1. Validate the query.
+        # -----------------------------------------------------
+
+        x = np.asarray(x, dtype=float)
+
+        if x.ndim != 1 or x.shape[0] != self.n_features:
+            raise ValueError(
+                f"x must be a 1D vector with {self.n_features} features."
+            )
+
+        if not np.all(np.isfinite(x)):
+            raise ValueError("x must contain finite values.")
+
+        # -----------------------------------------------------
+        # 2. Initialize the current best neighbour.
+        # -----------------------------------------------------
+
+        best_index = -1
+        best_sq_dist = np.inf
+
+        n_visited = 0
+
+        # -----------------------------------------------------
+        # 3. Define recursive nearest-neighbour traversal.
+        # -----------------------------------------------------
+
+        def search(node):
+            nonlocal best_index, best_sq_dist, n_visited
+
+            # -------------------------------------------------
+            # 3a. Process a leaf.
+            # -------------------------------------------------
+
+            if node["indices"] is not None:
+
+                indices = node["indices"]
+
+                # Compute distances only for points in this leaf.
+                differences = self.X[indices] - x
+
+                sq_dists = np.einsum(
+                    "ij,ij->i",
+                    differences,
+                    differences
+                )
+
+                # Count every point whose distance was computed.
+                n_visited += len(indices)
+
+                # Find the smallest squared distance in the leaf.
+                local_min = np.min(sq_dists)
+
+                # Resolve ties using the smaller original row index.
+                local_index = int(
+                    np.min(indices[sq_dists == local_min])
+                )
+
+                # Update the global best neighbour.
+                if (
+                    local_min < best_sq_dist
+                    or (
+                        local_min == best_sq_dist
+                        and (
+                            best_index < 0
+                            or local_index < best_index
+                        )
+                    )
+                ):
+                    best_sq_dist = float(local_min)
+                    best_index = local_index
+
+                return
+
+            # -------------------------------------------------
+            # 3b. Determine which subtree is nearer.
+            # -------------------------------------------------
+
+            axis = node["axis"]
+            split = node["split"]
+
+            # Go left if x[axis] < split; otherwise go right.
+            if x[axis] < split:
+                near = node["left"]
+                far = node["right"]
+            else:
+                near = node["right"]
+                far = node["left"]
+
+            # Search the nearer subtree first.
+            search(near)
+
+            # -------------------------------------------------
+            # 3c. Decide whether the other subtree can be pruned.
+            # -------------------------------------------------
+
+            # Squared distance from the query to the split plane.
+            gap = x[axis] - split
+            squared_gap = gap * gap
+
+            # Visit the far subtree when:
+            #
+            # squared_gap <= best_sq_dist
+            #
+            # The equality is important: an equally distant
+            # neighbour on the far side may have a smaller index.
+
+            if squared_gap <= best_sq_dist:
+                search(far)
+
+        # -----------------------------------------------------
+        # 4. Execute the recursive search.
+        # -----------------------------------------------------
+
+        search(self.root)
+
+        # -----------------------------------------------------
+        # 5. Return the exact nearest-neighbour result.
+        # -----------------------------------------------------
+
+        return (
+            int(best_index),
+            float(np.sqrt(best_sq_dist)),
+            int(n_visited)
+        )
+

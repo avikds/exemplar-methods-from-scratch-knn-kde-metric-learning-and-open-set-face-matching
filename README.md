@@ -38,6 +38,7 @@ python scaffold.py
 - [x] **26.** tune_threshold
 - [x] **27.** face_bakeoff
 - [x] **28.** online_gallery
+- [x] **29.** KDTree
 
 ---
 
