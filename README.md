@@ -30,6 +30,7 @@ python scaffold.py
 - [x] **18.** whitened_pca
 - [x] **19.** contrastive_loss
 - [x] **20.** mine_triplets
+- [x] **21.** triplet_loss
 
 ---
 

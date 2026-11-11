@@ -3872,3 +3872,178 @@ def mine_triplets(E, y, m=0.2, mode="semi-hard"):
         dtype=int
     ).reshape(-1, 3)
 
+# Step 21 - triplet_loss
+def triplet_loss(E, triplets, m=0.2):
+    """Return (loss, G): the mean triplet loss (eq 16.11)
+    over the given triples and its exact gradient with respect to E.
+
+    Parameters
+    ----------
+    E : ndarray, shape (N, L)
+        Embedding matrix. Each row represents an embedding.
+
+    triplets : ndarray, shape (T, 3)
+        Integer array containing (anchor, positive, negative)
+        indices.
+
+    m : float, default=0.2
+        Non-negative triplet margin.
+
+    Returns
+    -------
+    loss : float
+        Mean triplet loss over all supplied triplets.
+
+    G : ndarray, shape (N, L)
+        Gradient of the loss with respect to E.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Convert and validate the embedding matrix.
+    # ---------------------------------------------------------
+
+    E = np.asarray(E, dtype=float)
+
+    if E.ndim != 2:
+        raise ValueError("E must be a 2D array.")
+
+    N, L = E.shape
+
+    if L == 0:
+        raise ValueError("E must contain at least one embedding dimension.")
+
+    if not np.all(np.isfinite(E)):
+        raise ValueError("E must contain finite values.")
+
+    # ---------------------------------------------------------
+    # 2. Validate the margin.
+    # ---------------------------------------------------------
+
+    try:
+        m = float(m)
+    except (TypeError, ValueError):
+        raise ValueError("m must be a finite non-negative number.")
+
+    if not np.isfinite(m) or m < 0:
+        raise ValueError("m must be a finite non-negative number.")
+
+    # ---------------------------------------------------------
+    # 3. Validate triplets.
+    # ---------------------------------------------------------
+
+    triplets = np.asarray(triplets)
+
+    # Handle empty triplet input.
+    if triplets.size == 0:
+        if triplets.shape not in ((0,), (0, 3)):
+            raise ValueError("triplets must have shape (T, 3).")
+
+        return 0.0, np.zeros_like(E)
+
+    if triplets.ndim != 2 or triplets.shape[1] != 3:
+        raise ValueError("triplets must have shape (T, 3).")
+
+    if not np.issubdtype(triplets.dtype, np.integer):
+        raise ValueError("Triplet indices must be integers.")
+
+    if np.any(triplets < 0) or np.any(triplets >= N):
+        raise ValueError("Triplet indices must be valid rows of E.")
+
+    # Extract anchor, positive and negative indices.
+    a = triplets[:, 0]
+    p = triplets[:, 1]
+    n = triplets[:, 2]
+
+    # ---------------------------------------------------------
+    # 4. Calculate embedding differences.
+    # ---------------------------------------------------------
+
+    diff_ap = E[a] - E[p]
+    diff_an = E[a] - E[n]
+
+    # ---------------------------------------------------------
+    # 5. Compute squared Euclidean distances.
+    # ---------------------------------------------------------
+
+    d_ap_sq = np.sum(diff_ap ** 2, axis=1)
+    d_an_sq = np.sum(diff_an ** 2, axis=1)
+
+    # ---------------------------------------------------------
+    # 6. Compute the triplet hinge loss.
+    # ---------------------------------------------------------
+
+    # loss_i = max(d_ap^2 - d_an^2 + m, 0)
+
+    hinge = d_ap_sq - d_an_sq + m
+
+    # Only strictly positive hinge terms contribute to gradients.
+    active = hinge > 0.0
+
+    triplet_losses = np.maximum(hinge, 0.0)
+
+    # Average over ALL supplied triplets, including inactive ones.
+    T = len(triplets)
+
+    loss = float(np.mean(triplet_losses))
+
+    # ---------------------------------------------------------
+    # 7. Initialize the gradient.
+    # ---------------------------------------------------------
+
+    G = np.zeros_like(E)
+
+    # No active triplets means zero gradient.
+    if not np.any(active):
+        return loss, G
+
+    # Select active triplets.
+    a_active = a[active]
+    p_active = p[active]
+    n_active = n[active]
+
+    diff_ap_active = diff_ap[active]
+    diff_an_active = diff_an[active]
+
+    # Account for the mean over ALL triplets.
+    factor = 2.0 / T
+
+    # ---------------------------------------------------------
+    # 8. Compute the exact analytical gradients.
+    # ---------------------------------------------------------
+
+    # For an active triplet:
+    #
+    # dL / d(e_anchor) =
+    #     2 * [(e_anchor - e_positive)
+    #          - (e_anchor - e_negative)]
+    #
+    # IMPORTANT: The anchor gradient uses diff_ap - diff_an.
+
+    grad_anchor = factor * (
+        diff_ap_active - diff_an_active
+    )
+
+    # dL / d(e_positive) =
+    #     -2 * (e_anchor - e_positive)
+
+    grad_positive = -factor * diff_ap_active
+
+    # dL / d(e_negative) =
+    #      2 * (e_anchor - e_negative)
+
+    grad_negative = factor * diff_an_active
+
+    # ---------------------------------------------------------
+    # 9. Accumulate gradient contributions.
+    # ---------------------------------------------------------
+
+    # An embedding may appear in multiple triplets and in
+    # multiple roles. np.add.at correctly accumulates all
+    # contributions, including repeated indices.
+
+    np.add.at(G, a_active, grad_anchor)
+    np.add.at(G, p_active, grad_positive)
+    np.add.at(G, n_active, grad_negative)
+
+    return loss, G
+
