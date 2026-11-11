@@ -28,6 +28,7 @@ python scaffold.py
 - [x] **16.** lmnn_objective
 - [x] **17.** fit_linear_metric
 - [x] **18.** whitened_pca
+- [x] **19.** contrastive_loss
 
 ---
 

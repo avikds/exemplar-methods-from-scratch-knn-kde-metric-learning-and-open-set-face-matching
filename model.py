@@ -3443,3 +3443,244 @@ def apply_whitening(X, mean, components, scale):
 
     return whitened
 
+# Step 19 - contrastive_loss
+def unit_rows(E):
+    """Return (E_hat, norms), with each row scaled to unit length.
+
+    Rows with zero length are handled safely by flooring the
+    divisor at 1e-12.
+
+    Parameters
+    ----------
+    E : ndarray, shape (N, L)
+        Embedding matrix.
+
+    Returns
+    -------
+    E_hat : ndarray, shape (N, L)
+        Row-normalized embedding matrix.
+
+    norms : ndarray, shape (N, 1)
+        Original Euclidean norm of each row.
+    """
+
+    # Convert the embedding matrix to a floating-point array.
+    E = np.asarray(E, dtype=float)
+
+    if E.ndim != 2:
+        raise ValueError("E must be a 2D array.")
+
+    if not np.all(np.isfinite(E)):
+        raise ValueError("E must contain finite values.")
+
+    # Calculate the Euclidean norm of each embedding.
+    # keepdims=True preserves the shape (N, 1).
+    norms = np.linalg.norm(
+        E,
+        axis=1,
+        keepdims=True
+    )
+
+    # Prevent division by zero for zero-length embeddings.
+    safe_norms = np.maximum(norms, 1e-12)
+
+    # Normalize every row independently.
+    E_hat = E / safe_norms
+
+    return E_hat, norms
+
+
+def contrastive_loss(E, y, m=1.0):
+    """Return (loss, G): mean pairwise contrastive loss
+    and its exact gradient with respect to E.
+
+    Parameters
+    ----------
+    E : ndarray, shape (N, L)
+        Embedding matrix. E is treated as a free variable
+        and is not normalized inside this function.
+
+    y : ndarray, shape (N,)
+        Class labels.
+
+    m : float, default=1.0
+        Margin for negative pairs.
+
+    Returns
+    -------
+    loss : float
+        Mean contrastive loss over all unordered pairs.
+
+    G : ndarray, shape (N, L)
+        Gradient of the loss with respect to E.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Convert and validate inputs.
+    # ---------------------------------------------------------
+
+    E = np.asarray(E, dtype=float)
+    y = np.asarray(y).ravel()
+
+    if E.ndim != 2:
+        raise ValueError("E must be a 2D array.")
+
+    N, L = E.shape
+
+    if N < 2:
+        raise ValueError(
+            "At least two embeddings are required to form pairs."
+        )
+
+    if L < 1:
+        raise ValueError("E must contain at least one embedding dimension.")
+
+    if len(y) != N:
+        raise ValueError(
+            "E and y must contain the same number of observations."
+        )
+
+    if not np.all(np.isfinite(E)):
+        raise ValueError("E must contain finite values.")
+
+    try:
+        m = float(m)
+    except (TypeError, ValueError):
+        raise ValueError("m must be a finite non-negative number.")
+
+    if not np.isfinite(m) or m < 0:
+        raise ValueError("m must be a finite non-negative number.")
+
+    # ---------------------------------------------------------
+    # 2. Generate all unordered pairs i < j.
+    # ---------------------------------------------------------
+
+    # Only the upper triangular pairs are used.
+    # This avoids counting each pair twice.
+
+    i, j = np.triu_indices(N, k=1)
+
+    # Total number of unordered pairs.
+    n_pairs = len(i)
+
+    # ---------------------------------------------------------
+    # 3. Compute pairwise embedding differences and distances.
+    # ---------------------------------------------------------
+
+    # Difference vector for every unordered pair:
+    #
+    # delta_ij = e_i - e_j
+
+    diff = E[i] - E[j]
+
+    # Euclidean distance:
+    #
+    # d_ij = ||e_i - e_j||_2
+
+    distances = np.linalg.norm(
+        diff,
+        axis=1
+    )
+
+    # ---------------------------------------------------------
+    # 4. Identify positive and negative pairs.
+    # ---------------------------------------------------------
+
+    # Positive pair: same class.
+    # Negative pair: different classes.
+
+    positive = y[i] == y[j]
+    negative = ~positive
+
+    # ---------------------------------------------------------
+    # 5. Calculate the contrastive loss for every pair.
+    # ---------------------------------------------------------
+
+    # Positive-pair loss:
+    #
+    # l_ij = d_ij^2
+    #
+    # Negative-pair loss:
+    #
+    # l_ij = max(m - d_ij, 0)^2
+
+    pair_losses = np.zeros(n_pairs, dtype=float)
+
+    # Positive pairs.
+    pair_losses[positive] = distances[positive] ** 2
+
+    # Negative pairs.
+    negative_hinge = np.maximum(
+        m - distances[negative],
+        0.0
+    )
+
+    pair_losses[negative] = negative_hinge ** 2
+
+    # Average over all unordered pairs.
+    loss = float(np.mean(pair_losses))
+
+    # ---------------------------------------------------------
+    # 6. Calculate the gradient coefficient for each pair.
+    # ---------------------------------------------------------
+
+    # For a positive pair:
+    #
+    # d l_ij / d delta_ij = 2 * delta_ij
+    #
+    # Therefore, coefficient = 2.
+
+    coefficients = np.zeros(n_pairs, dtype=float)
+
+    coefficients[positive] = 2.0
+
+    # For a negative pair with an active hinge:
+    #
+    # l_ij = (m - d_ij)^2
+    #
+    # d l_ij / d delta_ij =
+    #
+    # -2(m - d_ij) * delta_ij / d_ij
+    #
+    # coefficient = -2(m - d_ij) / d_ij
+
+    active_negative = negative & (distances < m)
+
+    # When d_ij = 0 for a negative pair, the distance direction
+    # is undefined. The required subgradient is explicitly zero.
+
+    valid_negative = active_negative & (distances > 0.0)
+
+    coefficients[valid_negative] = (
+        -2.0
+        * (m - distances[valid_negative])
+        / distances[valid_negative]
+    )
+
+    # Negative pairs with zero distance retain coefficient zero.
+
+    # ---------------------------------------------------------
+    # 7. Calculate pairwise gradient contributions.
+    # ---------------------------------------------------------
+
+    # Normalize by the number of unordered pairs because
+    # the objective is the mean pairwise loss.
+
+    pair_grad = (
+        coefficients[:, None] * diff
+    ) / n_pairs
+
+    # ---------------------------------------------------------
+    # 8. Accumulate gradients for both endpoints of every pair.
+    # ---------------------------------------------------------
+
+    G = np.zeros_like(E)
+
+    # Gradient contribution for the first endpoint.
+    np.add.at(G, i, pair_grad)
+
+    # Gradient contribution for the second endpoint.
+    np.add.at(G, j, -pair_grad)
+
+    return loss, G
+
