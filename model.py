@@ -3129,3 +3129,317 @@ def fit_linear_metric(objective, W0, steps=200, lr=0.01):
 
     return W, history
 
+# Step 18 - whitened_pca
+def split_identities(n_people, n_train, n_calib, n_enrolled, n_impostors, seed=0):
+    """Split person IDs into train, calib, enrolled and impostors groups.
+
+    A seeded random permutation is divided into four consecutive
+    groups in the specified order.
+
+    Parameters
+    ----------
+    n_people : int
+        Total number of available identities.
+
+    n_train : int
+        Number of identities assigned to training.
+
+    n_calib : int
+        Number of identities assigned to calibration.
+
+    n_enrolled : int
+        Number of identities assigned to enrollment.
+
+    n_impostors : int
+        Number of identities assigned to the impostor group.
+
+    seed : int, default=0
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    dict
+        Dictionary containing integer arrays with keys:
+        'train', 'calib', 'enrolled', and 'impostors'.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Validate the identity counts.
+    # ---------------------------------------------------------
+
+    counts = {
+        "n_people": n_people,
+        "n_train": n_train,
+        "n_calib": n_calib,
+        "n_enrolled": n_enrolled,
+        "n_impostors": n_impostors
+    }
+
+    for name, value in counts.items():
+        if (
+            isinstance(value, (bool, np.bool_))
+            or not isinstance(value, (int, np.integer))
+        ):
+            raise ValueError(f"{name} must be an integer.")
+
+        if value < 0:
+            raise ValueError(f"{name} must be non-negative.")
+
+    n_people = int(n_people)
+    n_train = int(n_train)
+    n_calib = int(n_calib)
+    n_enrolled = int(n_enrolled)
+    n_impostors = int(n_impostors)
+
+    # The requested groups cannot contain more identities
+    # than are available.
+    total_requested = (
+        n_train + n_calib + n_enrolled + n_impostors
+    )
+
+    if total_requested > n_people:
+        raise ValueError(
+            "The total number of requested identities "
+            "cannot exceed n_people."
+        )
+
+    # ---------------------------------------------------------
+    # 2. Generate a reproducible permutation of person IDs.
+    # ---------------------------------------------------------
+
+    rng = np.random.default_rng(seed)
+
+    perm = rng.permutation(n_people)
+
+    # ---------------------------------------------------------
+    # 3. Divide the permutation into the four groups.
+    # ---------------------------------------------------------
+
+    start = 0
+
+    train_ids = perm[start:start + n_train]
+    start += n_train
+
+    calib_ids = perm[start:start + n_calib]
+    start += n_calib
+
+    enrolled_ids = perm[start:start + n_enrolled]
+    start += n_enrolled
+
+    impostor_ids = perm[start:start + n_impostors]
+
+    # Return mutually exclusive identity groups.
+    return {
+        "train": train_ids,
+        "calib": calib_ids,
+        "enrolled": enrolled_ids,
+        "impostors": impostor_ids
+    }
+
+
+def whitened_pca(X, k):
+    """Fit PCA whitening on the rows of X.
+
+    Parameters
+    ----------
+    X : ndarray, shape (N, D)
+        Training observations, with samples in rows.
+
+    k : int
+        Number of principal components to retain.
+
+    Returns
+    -------
+    mean : ndarray, shape (D,)
+        Column-wise training mean.
+
+    components : ndarray, shape (k, D)
+        Top k right singular vectors of the centred data.
+
+    scale : ndarray, shape (k,)
+        Corresponding singular values divided by sqrt(N).
+    """
+
+    # ---------------------------------------------------------
+    # 1. Convert and validate the input data.
+    # ---------------------------------------------------------
+
+    X = np.asarray(X, dtype=float)
+
+    if X.ndim != 2:
+        raise ValueError("X must be a 2D array.")
+
+    N, D = X.shape
+
+    if N == 0 or D == 0:
+        raise ValueError("X must contain observations and features.")
+
+    if not np.all(np.isfinite(X)):
+        raise ValueError("X must contain finite values.")
+
+    # ---------------------------------------------------------
+    # 2. Validate the number of components.
+    # ---------------------------------------------------------
+
+    if (
+        isinstance(k, (bool, np.bool_))
+        or not isinstance(k, (int, np.integer))
+        or k < 1
+    ):
+        raise ValueError("k must be a positive integer.")
+
+    if k >= N:
+        raise ValueError("k must be smaller than the number of samples.")
+
+    if k > D:
+        raise ValueError("k cannot exceed the number of features.")
+
+    # ---------------------------------------------------------
+    # 3. Calculate the column-wise mean.
+    # ---------------------------------------------------------
+
+    mean = np.mean(X, axis=0)
+
+    # Centre the observations using the training mean.
+    X_centered = X - mean
+
+    # ---------------------------------------------------------
+    # 4. Compute the Singular Value Decomposition.
+    # ---------------------------------------------------------
+
+    # X_centered = U @ diag(S) @ Vt
+    #
+    # The rows of Vt contain the right singular vectors.
+    #
+    # Use compact SVD to avoid unnecessarily large matrices.
+
+    U, singular_values, Vt = np.linalg.svd(
+        X_centered,
+        full_matrices=False
+    )
+
+    # ---------------------------------------------------------
+    # 5. Select the top k principal components.
+    # ---------------------------------------------------------
+
+    components = Vt[:k]
+
+    # ---------------------------------------------------------
+    # 6. Calculate the whitening scales.
+    # ---------------------------------------------------------
+
+    # scale_j = singular_value_j / sqrt(N)
+    #
+    # This uses the population variance convention:
+    #
+    # Var(X_j) = singular_value_j^2 / N
+
+    scale = singular_values[:k] / np.sqrt(N)
+
+    # A zero-variance component cannot be whitened.
+    if np.any(scale <= 0):
+        raise ValueError(
+            "The selected principal components must have "
+            "strictly positive variance."
+        )
+
+    return mean, components, scale
+
+
+def apply_whitening(X, mean, components, scale):
+    """Centre, project and scale X into whitened PCA coordinates.
+
+    Parameters
+    ----------
+    X : ndarray, shape (N, D)
+        Observations to transform.
+
+    mean : ndarray, shape (D,)
+        Mean learned from the PCA fitting data.
+
+    components : ndarray, shape (k, D)
+        Principal component vectors.
+
+    scale : ndarray, shape (k,)
+        Standard deviations corresponding to the retained
+        principal components.
+
+    Returns
+    -------
+    ndarray, shape (N, k)
+        Whitened observations.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Convert inputs to NumPy arrays.
+    # ---------------------------------------------------------
+
+    X = np.asarray(X, dtype=float)
+    mean = np.asarray(mean, dtype=float)
+    components = np.asarray(components, dtype=float)
+    scale = np.asarray(scale, dtype=float)
+
+    # ---------------------------------------------------------
+    # 2. Validate dimensions.
+    # ---------------------------------------------------------
+
+    if X.ndim != 2:
+        raise ValueError("X must be a 2D array.")
+
+    if mean.ndim != 1:
+        raise ValueError("mean must be a 1D array.")
+
+    if components.ndim != 2:
+        raise ValueError("components must be a 2D array.")
+
+    if scale.ndim != 1:
+        raise ValueError("scale must be a 1D array.")
+
+    N, D = X.shape
+    k, component_D = components.shape
+
+    if D != len(mean) or D != component_D:
+        raise ValueError(
+            "The feature dimensions of X, mean and components must match."
+        )
+
+    if len(scale) != k:
+        raise ValueError(
+            "scale must contain one value per principal component."
+        )
+
+    # ---------------------------------------------------------
+    # 3. Validate values and scales.
+    # ---------------------------------------------------------
+
+    if not (
+        np.all(np.isfinite(X))
+        and np.all(np.isfinite(mean))
+        and np.all(np.isfinite(components))
+        and np.all(np.isfinite(scale))
+    ):
+        raise ValueError("All inputs must contain finite values.")
+
+    if np.any(scale <= 0):
+        raise ValueError("Every whitening scale must be positive.")
+
+    # ---------------------------------------------------------
+    # 4. Centre the observations.
+    # ---------------------------------------------------------
+
+    X_centered = X - mean
+
+    # ---------------------------------------------------------
+    # 5. Project onto the retained principal components.
+    # ---------------------------------------------------------
+
+    projected = X_centered @ components.T
+
+    # ---------------------------------------------------------
+    # 6. Divide by the corresponding standard deviations.
+    # ---------------------------------------------------------
+
+    whitened = projected / scale
+
+    return whitened
+

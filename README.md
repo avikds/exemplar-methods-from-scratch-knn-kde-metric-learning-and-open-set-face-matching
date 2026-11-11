@@ -27,6 +27,7 @@ python scaffold.py
 - [x] **15.** nca_objective
 - [x] **16.** lmnn_objective
 - [x] **17.** fit_linear_metric
+- [x] **18.** whitened_pca
 
 ---
 
