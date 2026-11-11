@@ -831,3 +831,137 @@ def noise_dimension_curve(
 
     return accuracies
 
+# Step 7 - kde_density
+def density_kernel(u, name="gaussian"):
+    """Evaluate a normalized 1-D kernel of Table 16.1 element-wise.
+
+    Parameters
+    ----------
+    u : array-like
+        Input values at which to evaluate the kernel.
+
+    name : str, default="gaussian"
+        Kernel name. Supported kernels:
+        'gaussian', 'boxcar', 'epanechnikov', 'tricube'.
+
+    Returns
+    -------
+    ndarray
+        Kernel values with the same shape as u.
+    """
+
+    u = np.asarray(u, dtype=float)
+
+    # Gaussian kernel:
+    # K(u) = (2*pi)^(-1/2) * exp(-u^2 / 2)
+    if name == "gaussian":
+        return np.exp(-0.5 * u**2) / math.sqrt(2.0 * math.pi)
+
+    # Boxcar (uniform) kernel:
+    # K(u) = 1/2, when |u| <= 1; otherwise 0.
+    elif name == "boxcar":
+        return 0.5 * (np.abs(u) <= 1.0)
+
+    # Epanechnikov kernel:
+    # K(u) = 3/4 * (1 - u^2), when |u| <= 1; otherwise 0.
+    elif name == "epanechnikov":
+        return 0.75 * (1.0 - u**2) * (np.abs(u) <= 1.0)
+
+    # Tricube kernel:
+    # K(u) = 70/81 * (1 - |u|^3)^3, when |u| <= 1.
+    elif name == "tricube":
+        return (
+            (70.0 / 81.0)
+            * (1.0 - np.abs(u)**3)**3
+            * (np.abs(u) <= 1.0)
+        )
+
+    else:
+        raise ValueError(
+            "Unknown kernel name. Choose from "
+            "'gaussian', 'boxcar', 'epanechnikov', or 'tricube'."
+        )
+
+
+def kde_density(x_train, x_query, h, kernel="gaussian"):
+    """Return the Parzen window density estimate (eq 16.33).
+
+    Parameters
+    ----------
+    x_train : array-like
+        One-dimensional training observations.
+
+    x_query : array-like
+        Query locations at which to evaluate the density.
+
+    h : float
+        Positive bandwidth parameter.
+
+    kernel : str, default="gaussian"
+        Kernel name supported by density_kernel().
+
+    Returns
+    -------
+    ndarray
+        KDE density estimates at each query location.
+    """
+
+    # Convert inputs to NumPy arrays and flatten them.
+    x_train = np.asarray(x_train, dtype=float).ravel()
+    x_query = np.asarray(x_query, dtype=float).ravel()
+
+    # Validate the training data.
+    if x_train.size == 0:
+        raise ValueError("x_train must contain at least one observation.")
+
+    if not np.all(np.isfinite(x_train)):
+        raise ValueError("x_train must contain finite values.")
+
+    if not np.all(np.isfinite(x_query)):
+        raise ValueError("x_query must contain finite values.")
+
+    # Validate the bandwidth.
+    try:
+        h = float(h)
+    except (TypeError, ValueError):
+        raise ValueError("Bandwidth h must be a positive finite number.")
+
+    if not np.isfinite(h) or h <= 0:
+        raise ValueError("Bandwidth h must be a positive finite number.")
+
+    # Validate the kernel name.
+    # This also raises ValueError for unsupported kernel names.
+    if kernel not in (
+        "gaussian",
+        "boxcar",
+        "epanechnikov",
+        "tricube"
+    ):
+        raise ValueError(
+            "Unknown kernel name. Choose from "
+            "'gaussian', 'boxcar', 'epanechnikov', or 'tricube'."
+        )
+
+    # Number of training observations.
+    N = len(x_train)
+
+    # Compute scaled distances between every query point and
+    # every training observation.
+    #
+    # Shape: (n_query, N)
+    u = (x_query[:, None] - x_train[None, :]) / h
+
+    # Evaluate the selected kernel element-wise.
+    kernel_values = density_kernel(u, name=kernel)
+
+    # Apply the Parzen window density estimator:
+    #
+    # p(x | D) = (1/N) * sum_i [ (1/h) * K((x - x_i)/h) ]
+    #
+    # Equivalently:
+    # p(x | D) = mean(K((x - x_i)/h)) / h
+
+    density = np.mean(kernel_values, axis=1) / h
+
+    return density
+
