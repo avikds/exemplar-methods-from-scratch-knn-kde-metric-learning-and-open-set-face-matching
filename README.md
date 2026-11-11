@@ -20,6 +20,7 @@ python scaffold.py
 - [x] **8.** silverman_bandwidth
 - [x] **9.** kde_logpdf
 - [x] **10.** balloon_posterior
+- [x] **11.** kde_classifier
 
 ---
 

@@ -1546,3 +1546,225 @@ def balloon_posterior(X_train, y_train, X_query, K, n_classes=None):
 
     return cond, post
 
+# Step 11 - kde_classifier
+def kde_classifier(X_train, y_train, X_query, h, n_classes=None):
+    """Return the (n_query, n_classes) posterior of a generative
+    classifier with one fixed-bandwidth Gaussian KDE per class.
+
+    Parameters
+    ----------
+    X_train : ndarray, shape (N, D) or (N,)
+        Training feature vectors.
+
+    y_train : ndarray, shape (N,)
+        Integer class labels starting from 0.
+
+    X_query : ndarray, shape (n_query, D) or (n_query,)
+        Query feature vectors.
+
+    h : float
+        Positive Gaussian KDE bandwidth.
+
+    n_classes : int, optional
+        Number of classes. If None, inferred as max(y_train) + 1.
+        Every class must have at least one training observation.
+
+    Returns
+    -------
+    posterior : ndarray, shape (n_query, n_classes)
+        Posterior class probabilities for every query.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Convert inputs to NumPy arrays.
+    # ---------------------------------------------------------
+
+    X_train = np.asarray(X_train, dtype=float)
+    X_query = np.asarray(X_query, dtype=float)
+    y_train = np.asarray(y_train)
+
+    # Treat one-dimensional feature arrays as single-column data.
+    if X_train.ndim == 1:
+        X_train = X_train.reshape(-1, 1)
+    elif X_train.ndim != 2:
+        raise ValueError("X_train must be a 1-D or 2-D array.")
+
+    if X_query.ndim == 1:
+        X_query = X_query.reshape(-1, 1)
+    elif X_query.ndim != 2:
+        raise ValueError("X_query must be a 1-D or 2-D array.")
+
+    if y_train.ndim != 1:
+        raise ValueError("y_train must be a 1D array.")
+
+    # ---------------------------------------------------------
+    # 2. Validate input dimensions and values.
+    # ---------------------------------------------------------
+
+    N, D = X_train.shape
+    n_query = X_query.shape[0]
+
+    if N == 0 or D == 0:
+        raise ValueError("X_train must contain observations and features.")
+
+    if len(y_train) != N:
+        raise ValueError(
+            "X_train and y_train must have the same number of samples."
+        )
+
+    if X_query.shape[1] != D:
+        raise ValueError(
+            "X_train and X_query must have the same number of features."
+        )
+
+    if not np.all(np.isfinite(X_train)):
+        raise ValueError("X_train must contain finite values.")
+
+    if not np.all(np.isfinite(X_query)):
+        raise ValueError("X_query must contain finite values.")
+
+    # ---------------------------------------------------------
+    # 3. Validate the bandwidth.
+    # ---------------------------------------------------------
+
+    try:
+        h = float(h)
+    except (TypeError, ValueError):
+        raise ValueError("h must be a positive finite number.")
+
+    if not np.isfinite(h) or h <= 0:
+        raise ValueError("h must be a positive finite number.")
+
+    # ---------------------------------------------------------
+    # 4. Validate the training labels.
+    # ---------------------------------------------------------
+
+    if not np.issubdtype(y_train.dtype, np.integer):
+        raise ValueError("y_train must contain integer class labels.")
+
+    if np.any(y_train < 0):
+        raise ValueError("Class labels must be non-negative.")
+
+    # Determine the number of classes.
+    if n_classes is None:
+        n_classes = int(y_train.max()) + 1
+    else:
+        if (
+            isinstance(n_classes, (bool, np.bool_))
+            or not isinstance(n_classes, (int, np.integer))
+            or n_classes < 1
+        ):
+            raise ValueError("n_classes must be a positive integer.")
+
+        n_classes = int(n_classes)
+
+    if np.any(y_train >= n_classes):
+        raise ValueError(
+            "Every training label must be smaller than n_classes."
+        )
+
+    # ---------------------------------------------------------
+    # 5. Count the training observations in each class.
+    # ---------------------------------------------------------
+
+    class_counts = np.bincount(
+        y_train,
+        minlength=n_classes
+    )
+
+    # Every class must appear in the training set.
+    if np.any(class_counts == 0):
+        raise ValueError(
+            "Every class must have at least one training observation."
+        )
+
+    # Calculate the class prior probabilities.
+    #
+    # P(y=c) = N_c / N
+
+    priors = class_counts / N
+
+    # ---------------------------------------------------------
+    # 6. Compute the class-conditional Gaussian KDEs.
+    # ---------------------------------------------------------
+
+    # Store the joint log probabilities:
+    #
+    # log P(y=c, x | D)
+    #     = log P(x | y=c, D) + log P(y=c)
+
+    log_joint = np.empty(
+        (n_query, n_classes),
+        dtype=float
+    )
+
+    for c in range(n_classes):
+
+        # Select the training observations belonging to class c.
+        X_class = X_train[y_train == c]
+
+        # Estimate the class-conditional density using the
+        # Gaussian KDE implementation from Step 9.
+        log_conditional = kde_logpdf(
+            X_class,
+            X_query,
+            h,
+            leave_one_out=False
+        )
+
+        # Add the logarithm of the class prior.
+        log_joint[:, c] = (
+            log_conditional + np.log(priors[c])
+        )
+
+    # ---------------------------------------------------------
+    # 7. Normalize the posterior probabilities in log space.
+    # ---------------------------------------------------------
+
+    # Apply the log-sum-exp normalization:
+    #
+    # P(y=c | x, D) =
+    # exp(log_joint_c) / sum_j exp(log_joint_j)
+    #
+    # Subtracting the maximum prevents numerical overflow.
+
+    # Treat numerical NaNs from extreme floating-point cases
+    # as unavailable log probabilities.
+    log_joint = np.where(
+        np.isnan(log_joint),
+        -np.inf,
+        log_joint
+    )
+
+    row_max = np.max(
+        log_joint,
+        axis=1,
+        keepdims=True
+    )
+
+    posterior = np.empty_like(log_joint)
+
+    # Identify rows with at least one finite log probability.
+    valid_rows = np.isfinite(row_max[:, 0])
+
+    if np.any(valid_rows):
+
+        shifted = np.exp(
+            log_joint[valid_rows] - row_max[valid_rows]
+        )
+
+        normalizer = np.sum(
+            shifted,
+            axis=1,
+            keepdims=True
+        )
+
+        posterior[valid_rows] = shifted / normalizer
+
+    # If all class log probabilities are non-finite for an
+    # extreme numerical input, return the normalized priors.
+    if np.any(~valid_rows):
+        posterior[~valid_rows] = priors
+
+    return posterior
+
