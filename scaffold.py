@@ -20,7 +20,7 @@ import dml_data
 from sklearn.datasets import make_blobs
 from sklearn.metrics import adjusted_rand_score
 
-from solution import (pairwise_sq_dists, knn_proba, error_vs_k, one_nn_vs_bayes, cube_edge_length, noise_dimension_curve,
+from model import (pairwise_sq_dists, knn_proba, error_vs_k, one_nn_vs_bayes, cube_edge_length, noise_dimension_curve,
                       density_kernel, kde_density, silverman_bandwidth, kde_logpdf, loo_bandwidth, balloon_posterior,
                       kde_classifier, nadaraya_watson, loo_nw_bandwidth, loess, pair_gradient, nca_objective,
                       target_neighbors, lmnn_objective, fit_linear_metric, split_identities, whitened_pca,
