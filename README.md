@@ -34,6 +34,7 @@ python scaffold.py
 - [x] **22.** npairs_loss
 - [x] **23.** centroid_loss
 - [x] **24.** train_embedding
+- [x] **25.** open_set_predict
 
 ---
 

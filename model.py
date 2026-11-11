@@ -5041,3 +5041,238 @@ def train_embedding(
 
     return W, history
 
+# Step 25 - open_set_predict
+def open_set_predict(gallery, gallery_ids, probes, tau):
+    """Return (pred, scores): the best cosine match per probe,
+    with pred = -1 when the best similarity is below tau.
+
+    Parameters
+    ----------
+    gallery : ndarray, shape (N_gallery, L)
+        Gallery embeddings.
+
+    gallery_ids : ndarray, shape (N_gallery,)
+        Identity ID associated with each gallery row.
+
+    probes : ndarray, shape (N_probes, L)
+        Probe embeddings.
+
+    tau : float
+        Cosine similarity rejection threshold.
+        Positive and negative infinity are allowed.
+
+    Returns
+    -------
+    pred : ndarray, shape (N_probes,)
+        Predicted identity IDs, or -1 for rejected probes.
+
+    scores : ndarray, shape (N_probes,)
+        Maximum cosine similarity for each probe.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Convert inputs to NumPy arrays.
+    # ---------------------------------------------------------
+
+    gallery = np.asarray(gallery, dtype=float)
+    probes = np.asarray(probes, dtype=float)
+    gallery_ids = np.asarray(gallery_ids)
+
+    if gallery.ndim != 2:
+        raise ValueError("gallery must be a 2D array.")
+
+    if probes.ndim != 2:
+        raise ValueError("probes must be a 2D array.")
+
+    if gallery_ids.ndim != 1:
+        raise ValueError("gallery_ids must be a 1D array.")
+
+    # ---------------------------------------------------------
+    # 2. Validate dimensions and input values.
+    # ---------------------------------------------------------
+
+    n_gallery, L = gallery.shape
+    n_probes = probes.shape[0]
+
+    if n_gallery == 0 or L == 0:
+        raise ValueError("gallery must contain at least one embedding.")
+
+    if len(gallery_ids) != n_gallery:
+        raise ValueError(
+            "gallery_ids must contain one ID per gallery embedding."
+        )
+
+    if probes.shape[1] != L:
+        raise ValueError(
+            "gallery and probes must have the same embedding dimension."
+        )
+
+    if not np.all(np.isfinite(gallery)):
+        raise ValueError("gallery must contain finite values.")
+
+    if not np.all(np.isfinite(probes)):
+        raise ValueError("probes must contain finite values.")
+
+    if not np.issubdtype(gallery_ids.dtype, np.integer):
+        raise ValueError("gallery_ids must contain integer IDs.")
+
+    if np.any(gallery_ids == -1):
+        raise ValueError("-1 is reserved for rejected predictions.")
+
+    # ---------------------------------------------------------
+    # 3. Validate the threshold.
+    # ---------------------------------------------------------
+
+    try:
+        tau = float(tau)
+    except (TypeError, ValueError):
+        raise ValueError("tau must be a numeric scalar.")
+
+    # IMPORTANT:
+    # Allow +inf and -inf because they are useful for
+    # accepting all probes or rejecting all probes.
+    # Only NaN is invalid.
+    if np.isnan(tau):
+        raise ValueError("tau must not be NaN.")
+
+    # ---------------------------------------------------------
+    # 4. Normalize gallery and probe embeddings.
+    # ---------------------------------------------------------
+
+    # Reuse unit_rows() from Step 19.
+    gallery_hat, _ = unit_rows(gallery)
+    probes_hat, _ = unit_rows(probes)
+
+    # ---------------------------------------------------------
+    # 5. Compute cosine similarities.
+    # ---------------------------------------------------------
+
+    # For normalized vectors, cosine similarity is their
+    # ordinary dot product.
+    #
+    # Shape: (n_probes, n_gallery)
+
+    similarities = probes_hat @ gallery_hat.T
+
+    # Protect against floating-point rounding.
+    similarities = np.clip(
+        similarities,
+        -1.0,
+        1.0
+    )
+
+    # ---------------------------------------------------------
+    # 6. Find the best matching gallery row.
+    # ---------------------------------------------------------
+
+    # np.argmax returns the first occurrence of the maximum,
+    # so the earlier gallery row wins in a tie.
+
+    best_indices = np.argmax(
+        similarities,
+        axis=1
+    )
+
+    scores = similarities[
+        np.arange(n_probes),
+        best_indices
+    ]
+
+    # ---------------------------------------------------------
+    # 7. Apply the rejection threshold.
+    # ---------------------------------------------------------
+
+    # Accept when score >= tau.
+    # Reject when score < tau.
+
+    accepted = scores >= tau
+
+    pred = np.full(
+        n_probes,
+        -1,
+        dtype=np.int64
+    )
+
+    pred[accepted] = gallery_ids[
+        best_indices[accepted]
+    ].astype(np.int64)
+
+    return pred, scores
+
+
+def open_set_metrics(pred, true):
+    """Return a dictionary containing DIR, FAR and balanced score.
+
+    A true identity of -1 represents a non-enrolled person.
+
+    Parameters
+    ----------
+    pred : ndarray, shape (N,)
+        Predicted identity IDs. -1 indicates rejection.
+
+    true : ndarray, shape (N,)
+        Actual identity IDs. -1 indicates a non-enrolled person.
+
+    Returns
+    -------
+    dict
+        'dir'      : Detection and identification rate.
+        'far'      : False acceptance rate.
+        'balanced' : 0.5 * (dir + 1 - far).
+    """
+
+    pred = np.asarray(pred)
+    true = np.asarray(true)
+
+    # Validate input dimensions.
+    if pred.ndim != 1 or true.ndim != 1:
+        raise ValueError("pred and true must be 1D arrays.")
+
+    if len(pred) != len(true):
+        raise ValueError(
+            "pred and true must have the same number of observations."
+        )
+
+    if not np.issubdtype(pred.dtype, np.integer):
+        raise ValueError("pred must contain integer identity IDs.")
+
+    if not np.issubdtype(true.dtype, np.integer):
+        raise ValueError("true must contain integer identity IDs.")
+
+    if len(true) == 0:
+        raise ValueError("At least one probe is required.")
+
+    # Separate enrolled and non-enrolled probes.
+    enrolled = true != -1
+    non_enrolled = true == -1
+
+    # Both types of probes must be present.
+    if not np.any(enrolled):
+        raise ValueError("At least one enrolled probe is required.")
+
+    if not np.any(non_enrolled):
+        raise ValueError("At least one non-enrolled probe is required.")
+
+    # Detection and identification rate:
+    # Correctly identified enrolled probes / all enrolled probes.
+    dir_rate = np.mean(
+        pred[enrolled] == true[enrolled]
+    )
+
+    # False acceptance rate:
+    # Accepted non-enrolled probes / all non-enrolled probes.
+    far_rate = np.mean(
+        pred[non_enrolled] != -1
+    )
+
+    # Balanced score.
+    balanced = 0.5 * (
+        dir_rate + 1.0 - far_rate
+    )
+
+    return {
+        "dir": float(dir_rate),
+        "far": float(far_rate),
+        "balanced": float(balanced)
+    }
+
