@@ -19,6 +19,7 @@ python scaffold.py
 - [x] **7.** kde_density
 - [x] **8.** silverman_bandwidth
 - [x] **9.** kde_logpdf
+- [x] **10.** balloon_posterior
 
 ---
 

@@ -1289,3 +1289,260 @@ def loo_bandwidth(X, grid):
 
     return best_h, curve
 
+# Step 10 - balloon_posterior
+def balloon_posterior(X_train, y_train, X_query, K, n_classes=None):
+    """Return (cond, post): balloon class conditionals (eq 16.34)
+    and the posterior they imply through Bayes' rule (eq 16.35).
+
+    Parameters
+    ----------
+    X_train : ndarray, shape (N, D)
+        Training feature vectors.
+
+    y_train : ndarray, shape (N,)
+        Integer training class labels starting from 0.
+
+    X_query : ndarray, shape (n_query, D)
+        Query feature vectors.
+
+    K : int
+        Number of nearest training neighbours.
+
+    n_classes : int, optional
+        Number of classes. If None, inferred as max(y_train) + 1.
+
+    Returns
+    -------
+    cond : ndarray, shape (n_query, n_classes)
+        Balloon class-conditional density estimates.
+
+    post : ndarray, shape (n_query, n_classes)
+        Posterior probabilities calculated using Bayes' rule.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Convert inputs and validate dimensions.
+    # ---------------------------------------------------------
+
+    X_train = np.asarray(X_train, dtype=float)
+    X_query = np.asarray(X_query, dtype=float)
+    y_train = np.asarray(y_train)
+
+    if X_train.ndim != 2:
+        raise ValueError("X_train must be a 2D array.")
+
+    if X_query.ndim != 2:
+        raise ValueError("X_query must be a 2D array.")
+
+    if y_train.ndim != 1:
+        raise ValueError("y_train must be a 1D array.")
+
+    N, D = X_train.shape
+    n_query = X_query.shape[0]
+
+    if N == 0 or D == 0:
+        raise ValueError("X_train must contain samples and features.")
+
+    if len(y_train) != N:
+        raise ValueError("X_train and y_train must have the same number of samples.")
+
+    if X_query.shape[1] != D:
+        raise ValueError("X_train and X_query must have the same feature dimension.")
+
+    if not np.all(np.isfinite(X_train)) or not np.all(np.isfinite(X_query)):
+        raise ValueError("Training and query data must contain finite values.")
+
+    # ---------------------------------------------------------
+    # 2. Validate K and class labels.
+    # ---------------------------------------------------------
+
+    if (
+        isinstance(K, (bool, np.bool_))
+        or not isinstance(K, (int, np.integer))
+        or not 1 <= K <= N
+    ):
+        raise ValueError("K must be an integer between 1 and N.")
+
+    if not np.issubdtype(y_train.dtype, np.integer):
+        raise ValueError("y_train must contain integer labels.")
+
+    if np.any(y_train < 0):
+        raise ValueError("Class labels must be non-negative.")
+
+    if n_classes is None:
+        n_classes = int(y_train.max()) + 1
+    else:
+        if (
+            isinstance(n_classes, (bool, np.bool_))
+            or not isinstance(n_classes, (int, np.integer))
+            or n_classes < 1
+        ):
+            raise ValueError("n_classes must be a positive integer.")
+
+        n_classes = int(n_classes)
+
+    if np.any(y_train >= n_classes):
+        raise ValueError("Training labels must be smaller than n_classes.")
+
+    # ---------------------------------------------------------
+    # 3. Compute pairwise squared Euclidean distances.
+    # ---------------------------------------------------------
+
+    sq_dists = pairwise_sq_dists(X_query, X_train)
+
+    # ---------------------------------------------------------
+    # 4. Find the K nearest training observations.
+    # ---------------------------------------------------------
+
+    # Stable sorting ensures that smaller training indices
+    # win when two distances are equal.
+
+    nearest_indices = np.argsort(
+        sq_dists,
+        axis=1,
+        kind="stable"
+    )[:, :K]
+
+    nearest_labels = y_train[nearest_indices]
+
+    # ---------------------------------------------------------
+    # 5. Count the observations belonging to each class.
+    # ---------------------------------------------------------
+
+    # Total number of training observations in each class.
+    class_counts = np.bincount(
+        y_train,
+        minlength=n_classes
+    )
+
+    # Number of observations from each class inside
+    # the K-nearest-neighbour balloon.
+    local_counts = np.zeros(
+        (n_query, n_classes),
+        dtype=float
+    )
+
+    query_indices = np.repeat(
+        np.arange(n_query),
+        K
+    )
+
+    np.add.at(
+        local_counts,
+        (query_indices, nearest_labels.ravel()),
+        1.0
+    )
+
+    # ---------------------------------------------------------
+    # 6. Calculate the CORRECT K-th nearest-neighbour radius.
+    # ---------------------------------------------------------
+
+    # IMPORTANT:
+    # The original distance matrix is NOT sorted.
+    # Therefore, sq_dists[:, K-1] is NOT the K-th nearest
+    # distance.
+    #
+    # Retrieve the distances corresponding to the already
+    # sorted nearest-neighbour indices.
+
+    nearest_sq_dists = np.take_along_axis(
+        sq_dists,
+        nearest_indices,
+        axis=1
+    )
+
+    # The last entry is the squared distance to the K-th
+    # nearest training observation.
+    kth_sq_dist = nearest_sq_dists[:, K - 1]
+
+    radius = np.sqrt(kth_sq_dist)
+
+    # ---------------------------------------------------------
+    # 7. Calculate the D-dimensional balloon volume.
+    # ---------------------------------------------------------
+
+    # V(x) = pi^(D/2) * r^D / Gamma(D/2 + 1)
+
+    log_unit_ball_volume = (
+        0.5 * D * math.log(math.pi)
+        - math.lgamma(0.5 * D + 1.0)
+    )
+
+    with np.errstate(divide="ignore"):
+        log_volume = (
+            log_unit_ball_volume
+            + D * np.log(radius)
+        )
+
+    # Prevent zero-volume problems when a query coincides
+    # with a training observation.
+    log_volume = np.clip(
+        log_volume,
+        math.log(1e-300),
+        math.log(np.finfo(float).max)
+    )
+
+    volume = np.exp(log_volume)
+
+    # ---------------------------------------------------------
+    # 8. Compute the balloon class-conditional densities.
+    # ---------------------------------------------------------
+
+    # Equation 16.34:
+    #
+    # p(x | y=c, D) = N_c(x) / (N_c * V(x))
+
+    denominator = (
+        class_counts[None, :] * volume[:, None]
+    )
+
+    cond = np.zeros(
+        (n_query, n_classes),
+        dtype=float
+    )
+
+    np.divide(
+        local_counts,
+        denominator,
+        out=cond,
+        where=denominator > 0
+    )
+
+    # ---------------------------------------------------------
+    # 9. Calculate the class priors.
+    # ---------------------------------------------------------
+
+    # p(y=c) = N_c / N
+
+    priors = class_counts / N
+
+    # ---------------------------------------------------------
+    # 10. Calculate posterior probabilities using Bayes' rule.
+    # ---------------------------------------------------------
+
+    # Equation 16.35:
+    #
+    # p(y=c | x, D) =
+    #     p(x | y=c, D) * p(y=c)
+    #     -----------------------
+    #     sum_j p(x | y=j, D) * p(y=j)
+
+    joint = cond * priors[None, :]
+
+    normalizer = np.sum(
+        joint,
+        axis=1,
+        keepdims=True
+    )
+
+    post = np.zeros_like(joint)
+
+    np.divide(
+        joint,
+        normalizer,
+        out=post,
+        where=normalizer > 0
+    )
+
+    return cond, post
+
