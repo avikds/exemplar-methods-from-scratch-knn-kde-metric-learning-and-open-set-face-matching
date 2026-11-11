@@ -4320,3 +4320,205 @@ def npairs_loss(E, y, tau=1.0):
 
     return loss, G
 
+# Step 23 - centroid_loss
+def centroid_loss(E, y, centroids):
+    """Return (loss, G): the per-point bracket of the centroid
+    upper-bound loss (eq 16.22), averaged over points, and its
+    gradient with respect to E.
+
+    Parameters
+    ----------
+    E : ndarray, shape (N, L)
+        Embedding matrix.
+
+    y : ndarray, shape (N,)
+        Integer class labels from 0 to C-1.
+
+    centroids : ndarray, shape (C, L)
+        Class centroids, with one centroid per class.
+
+    Returns
+    -------
+    loss : float
+        Mean centroid loss over all observations.
+
+    G : ndarray, shape (N, L)
+        Exact gradient with respect to E.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Convert inputs to NumPy arrays.
+    # ---------------------------------------------------------
+
+    E = np.asarray(E, dtype=float)
+    y = np.asarray(y)
+    centroids = np.asarray(centroids, dtype=float)
+
+    # ---------------------------------------------------------
+    # 2. Validate input dimensions.
+    # ---------------------------------------------------------
+
+    if E.ndim != 2:
+        raise ValueError("E must be a 2D array.")
+
+    if centroids.ndim != 2:
+        raise ValueError("centroids must be a 2D array.")
+
+    if y.ndim != 1:
+        raise ValueError("y must be a 1D array.")
+
+    N, L = E.shape
+    C, centroid_L = centroids.shape
+
+    if N == 0 or L == 0:
+        raise ValueError("E must contain observations and features.")
+
+    if C < 2:
+        raise ValueError("At least two class centroids are required.")
+
+    if centroid_L != L:
+        raise ValueError(
+            "E and centroids must have the same embedding dimension."
+        )
+
+    if len(y) != N:
+        raise ValueError(
+            "E and y must have the same number of observations."
+        )
+
+    # ---------------------------------------------------------
+    # 3. Validate the input values and labels.
+    # ---------------------------------------------------------
+
+    if not (
+        np.all(np.isfinite(E))
+        and np.all(np.isfinite(centroids))
+    ):
+        raise ValueError("E and centroids must contain finite values.")
+
+    if not np.issubdtype(y.dtype, np.integer):
+        raise ValueError("y must contain integer class labels.")
+
+    if np.any(y < 0) or np.any(y >= C):
+        raise ValueError("Labels must be between 0 and C-1.")
+
+    # ---------------------------------------------------------
+    # 4. Compute distances from every embedding to every centroid.
+    # ---------------------------------------------------------
+
+    # diff[i, c] = E[i] - centroids[c]
+    #
+    # Shape: (N, C, L)
+
+    diff = E[:, None, :] - centroids[None, :, :]
+
+    # Euclidean distances.
+    # Shape: (N, C)
+
+    distances = np.linalg.norm(diff, axis=2)
+
+    # ---------------------------------------------------------
+    # 5. Extract the distance to each point's own centroid.
+    # ---------------------------------------------------------
+
+    rows = np.arange(N)
+
+    own_distances = distances[rows, y]
+
+    # ---------------------------------------------------------
+    # 6. Calculate distances to all other class centroids.
+    # ---------------------------------------------------------
+
+    other_mask = np.ones((N, C), dtype=bool)
+
+    other_mask[rows, y] = False
+
+    other_distance_sum = np.sum(
+        np.where(other_mask, distances, 0.0),
+        axis=1
+    )
+
+    # ---------------------------------------------------------
+    # 7. Calculate the correctly normalized centroid loss.
+    # ---------------------------------------------------------
+
+    # IMPORTANT:
+    # Equation 16.22 uses:
+    #
+    # alpha = 1 / (3 * (C - 1))
+    #
+    # There is NO additional factor of C in the denominator.
+
+    alpha = 1.0 / (3.0 * (C - 1))
+
+    # Per-point loss:
+    #
+    # L_i = ||e_i - c_yi||
+    #       - alpha * sum_{m != yi} ||e_i - c_m||
+
+    point_losses = (
+        own_distances
+        - alpha * other_distance_sum
+    )
+
+    # Mean over all observations.
+    loss = float(np.mean(point_losses))
+
+    # ---------------------------------------------------------
+    # 8. Calculate unit direction vectors.
+    # ---------------------------------------------------------
+
+    # For a nonzero distance:
+    #
+    # d ||e_i - c_m|| / d e_i
+    #     = (e_i - c_m) / ||e_i - c_m||
+    #
+    # At exactly zero distance, use a zero gradient contribution.
+
+    directions = np.zeros_like(diff)
+
+    np.divide(
+        diff,
+        distances[:, :, None],
+        out=directions,
+        where=distances[:, :, None] > 0.0
+    )
+
+    # ---------------------------------------------------------
+    # 9. Gradient contribution from own centroids.
+    # ---------------------------------------------------------
+
+    own_directions = directions[rows, y]
+
+    # ---------------------------------------------------------
+    # 10. Gradient contribution from other centroids.
+    # ---------------------------------------------------------
+
+    other_directions = np.where(
+        other_mask[:, :, None],
+        directions,
+        0.0
+    )
+
+    other_direction_sum = np.sum(
+        other_directions,
+        axis=1
+    )
+
+    # ---------------------------------------------------------
+    # 11. Combine gradient contributions.
+    # ---------------------------------------------------------
+
+    # dL/dE_i =
+    #     (1/N) * (
+    #         own_direction
+    #         - alpha * sum(other_directions)
+    #     )
+
+    G = (
+        own_directions
+        - alpha * other_direction_sum
+    ) / N
+
+    return loss, G
+
